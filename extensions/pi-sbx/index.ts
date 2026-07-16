@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -23,9 +22,10 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { parseMatchingSandboxes, type SbxSandbox } from "./discovery.ts";
+import { SbxTransport, type SbxExecOptions, type SbxExecResult } from "./transport.ts";
 
-const STATUS_ID = "sbx-tools";
-const STATE_ENTRY = "sbx-tools-selection";
+const STATUS_ID = "pi-sbx";
+const STATE_ENTRY = "pi-sbx-selection";
 const ROUTED_TOOLS = new Set(["bash", "edit", "find", "grep", "ls", "read", "write"]);
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
 const DEFAULT_GREP_LIMIT = 100;
@@ -35,152 +35,31 @@ interface SelectionState {
 	hostFallback?: boolean;
 }
 
-interface SbxExecResult {
-	stdout: Buffer;
-	stderr: Buffer;
-	exitCode: number | null;
-}
-
-interface SbxExecOptions {
-	input?: Buffer | string;
-	onStdout?: (data: Buffer) => void;
-	onStderr?: (data: Buffer) => void;
-	signal?: AbortSignal;
-	timeoutSeconds?: number;
-}
-
-function lifecycleLine(sandbox: string, line: string): boolean {
-	return line.trim() === `Sandbox ${sandbox} started successfully`;
-}
-
-function killProcess(child: ReturnType<typeof spawn>): void {
-	if (!child.pid) return;
-	try {
-		process.kill(-child.pid, "SIGKILL");
-	} catch {
-		child.kill("SIGKILL");
-	}
-}
-
-function executeInSandbox(
-	sandbox: string,
-	cwd: string,
-	command: string[],
-	options: SbxExecOptions = {},
-): Promise<SbxExecResult> {
-	return new Promise((resolve, reject) => {
-		if (options.signal?.aborted) {
-			reject(new Error("aborted"));
-			return;
-		}
-
-		const args = ["exec"];
-		if (options.input !== undefined) args.push("-i");
-		args.push("--workdir", cwd, sandbox, ...command);
-		const child = spawn("sbx", args, {
-			detached: true,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-		const stdout: Buffer[] = [];
-		const stderr: Buffer[] = [];
-		let stderrPending = "";
-		let timedOut = false;
-		let settled = false;
-
-		const flushStderrLines = (final: boolean) => {
-			const lines = stderrPending.split("\n");
-			stderrPending = final ? "" : (lines.pop() ?? "");
-			for (const [index, rawLine] of lines.entries()) {
-				const line = rawLine + (final && index === lines.length - 1 && !rawLine ? "" : "\n");
-				if (lifecycleLine(sandbox, rawLine)) continue;
-				const data = Buffer.from(line);
-				stderr.push(data);
-				options.onStderr?.(data);
-			}
-			if (final && stderrPending) {
-				if (!lifecycleLine(sandbox, stderrPending)) {
-					const data = Buffer.from(stderrPending);
-					stderr.push(data);
-					options.onStderr?.(data);
-				}
-				stderrPending = "";
-			}
-		};
-
-		child.stdout.on("data", (data: Buffer) => {
-			stdout.push(data);
-			options.onStdout?.(data);
-		});
-		child.stderr.on("data", (data: Buffer) => {
-			stderrPending += data.toString();
-			flushStderrLines(false);
-		});
-
-		const timeoutSeconds = options.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS;
-		const timer = timeoutSeconds > 0
-			? setTimeout(() => {
-				timedOut = true;
-				killProcess(child);
-			}, timeoutSeconds * 1000)
-			: undefined;
-		const onAbort = () => killProcess(child);
-		options.signal?.addEventListener("abort", onAbort, { once: true });
-
-		const cleanup = () => {
-			if (timer) clearTimeout(timer);
-			options.signal?.removeEventListener("abort", onAbort);
-		};
-
-		child.on("error", (error) => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			reject(error);
-		});
-		child.on("close", (exitCode) => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			flushStderrLines(true);
-			if (options.signal?.aborted) {
-				reject(new Error("aborted"));
-			} else if (timedOut) {
-				reject(new Error(`timeout:${timeoutSeconds}`));
-			} else {
-				resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode });
-			}
-		});
-
-		if (options.input === undefined) child.stdin.end();
-		else child.stdin.end(options.input);
-	});
-}
-
 function commandError(command: string[], result: SbxExecResult): Error {
 	const detail = result.stderr.toString().trim() || result.stdout.toString().trim();
 	return new Error(detail || `${command[0] ?? "command"} exited with code ${result.exitCode}`);
 }
 
 async function successfulExec(
-	sandbox: string,
+	transport: SbxTransport,
 	cwd: string,
 	command: string[],
 	options?: SbxExecOptions,
 ): Promise<SbxExecResult> {
-	const result = await executeInSandbox(sandbox, cwd, command, options);
+	const result = await transport.execute(cwd, command, options);
 	if (result.exitCode !== 0) throw commandError(command, result);
 	return result;
 }
 
-function createSbxReadOps(sandbox: string, cwd: string): ReadOperations {
+function createSbxReadOps(transport: SbxTransport, cwd: string): ReadOperations {
 	return {
 		readFile: async (filePath) =>
-			(await successfulExec(sandbox, cwd, ["sh", "-c", 'cat -- "$1"', "sbx-read", filePath])).stdout,
+			(await successfulExec(transport, cwd, ["sh", "-c", 'cat -- "$1"', "sbx-read", filePath])).stdout,
 		access: async (filePath) => {
-			await successfulExec(sandbox, cwd, ["sh", "-c", 'test -r "$1"', "sbx-read", filePath]);
+			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1"', "sbx-read", filePath]);
 		},
 		detectImageMimeType: async (filePath) => {
-			const result = await executeInSandbox(sandbox, cwd, ["file", "--mime-type", "-b", filePath]);
+			const result = await transport.execute(cwd, ["file", "--mime-type", "-b", filePath]);
 			if (result.exitCode !== 0) return null;
 			const mimeType = result.stdout.toString().trim();
 			return ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"].includes(mimeType)
@@ -190,33 +69,33 @@ function createSbxReadOps(sandbox: string, cwd: string): ReadOperations {
 	};
 }
 
-function createSbxWriteOps(sandbox: string, cwd: string): WriteOperations {
+function createSbxWriteOps(transport: SbxTransport, cwd: string): WriteOperations {
 	return {
 		mkdir: async (dirPath) => {
-			await successfulExec(sandbox, cwd, ["mkdir", "-p", "--", dirPath]);
+			await successfulExec(transport, cwd, ["mkdir", "-p", "--", dirPath]);
 		},
 		writeFile: async (filePath, content) => {
-			await successfulExec(sandbox, cwd, ["sh", "-c", 'cat > "$1"', "sbx-write", filePath], { input: content });
+			await successfulExec(transport, cwd, ["sh", "-c", 'cat > "$1"', "sbx-write", filePath], { input: content });
 		},
 	};
 }
 
-function createSbxEditOps(sandbox: string, cwd: string): EditOperations {
-	const read = createSbxReadOps(sandbox, cwd);
-	const write = createSbxWriteOps(sandbox, cwd);
+function createSbxEditOps(transport: SbxTransport, cwd: string): EditOperations {
+	const read = createSbxReadOps(transport, cwd);
+	const write = createSbxWriteOps(transport, cwd);
 	return {
 		readFile: read.readFile,
 		writeFile: write.writeFile,
 		access: async (filePath) => {
-			await successfulExec(sandbox, cwd, ["sh", "-c", 'test -r "$1" && test -w "$1"', "sbx-edit", filePath]);
+			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1" && test -w "$1"', "sbx-edit", filePath]);
 		},
 	};
 }
 
-function createSbxBashOps(sandbox: string): BashOperations {
+function createSbxBashOps(transport: SbxTransport): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout }) => {
-			const result = await executeInSandbox(sandbox, cwd, ["sh", "-lc", command], {
+			const result = await transport.execute(cwd, ["sh", "-lc", command], {
 				onStdout: onData,
 				onStderr: onData,
 				signal,
@@ -227,17 +106,17 @@ function createSbxBashOps(sandbox: string): BashOperations {
 	};
 }
 
-function createSbxLsOps(sandbox: string, cwd: string): LsOperations {
+function createSbxLsOps(transport: SbxTransport, cwd: string): LsOperations {
 	const directoryCache = new Map<string, boolean>();
 	return {
 		exists: async (filePath) => {
-			const result = await executeInSandbox(sandbox, cwd, ["sh", "-c", 'test -e "$1"', "sbx-ls", filePath]);
+			const result = await transport.execute(cwd, ["sh", "-c", 'test -e "$1"', "sbx-ls", filePath]);
 			return result.exitCode === 0;
 		},
 		stat: async (filePath) => {
 			let isDirectory = directoryCache.get(filePath);
 			if (isDirectory === undefined) {
-				const result = await executeInSandbox(sandbox, cwd, ["sh", "-c", 'test -d "$1"', "sbx-ls", filePath]);
+				const result = await transport.execute(cwd, ["sh", "-c", 'test -d "$1"', "sbx-ls", filePath]);
 				isDirectory = result.exitCode === 0;
 				directoryCache.set(filePath, isDirectory);
 			}
@@ -250,7 +129,7 @@ function createSbxLsOps(sandbox: string, cwd: string): LsOperations {
 				"items = [{'name': name, 'directory': os.path.isdir(os.path.join(root, name))} for name in os.listdir(root)]",
 				"json.dump(items, sys.stdout)",
 			].join("; ");
-			const result = await successfulExec(sandbox, cwd, ["python3", "-c", script, dirPath]);
+			const result = await successfulExec(transport, cwd, ["python3", "-c", script, dirPath]);
 			const entries = JSON.parse(result.stdout.toString()) as Array<{ name: string; directory: boolean }>;
 			for (const entry of entries) directoryCache.set(path.join(dirPath, entry.name), entry.directory);
 			return entries.map((entry) => entry.name);
@@ -266,14 +145,14 @@ function matchesToolGlob(relativePath: string, pattern: string): boolean {
 	return path.posix.matchesGlob(path.posix.basename(relativePath), normalized);
 }
 
-function createSbxFindOps(sandbox: string, sessionCwd: string): FindOperations {
+function createSbxFindOps(transport: SbxTransport, sessionCwd: string): FindOperations {
 	return {
 		exists: async (filePath) => {
-			const result = await executeInSandbox(sandbox, sessionCwd, ["sh", "-c", 'test -e "$1"', "sbx-find", filePath]);
+			const result = await transport.execute(sessionCwd, ["sh", "-c", 'test -e "$1"', "sbx-find", filePath]);
 			return result.exitCode === 0;
 		},
 		glob: async (pattern, cwd, options) => {
-			const result = await executeInSandbox(sandbox, cwd, [
+			const result = await transport.execute(cwd, [
 				"rg",
 				"--files",
 				"--hidden",
@@ -305,13 +184,13 @@ function formatGrepPath(searchPath: string, filePath: string, isDirectory: boole
 }
 
 async function executeSbxGrep(
-	sandbox: string,
+	transport: SbxTransport,
 	cwd: string,
 	params: GrepToolInput,
 	signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: GrepToolDetails | undefined }> {
 	const searchPath = path.resolve(cwd, params.path ?? ".");
-	const directoryResult = await executeInSandbox(sandbox, cwd, ["sh", "-c", 'test -d "$1"', "sbx-grep", searchPath], {
+	const directoryResult = await transport.execute(cwd, ["sh", "-c", 'test -d "$1"', "sbx-grep", searchPath], {
 		signal,
 	});
 	const isDirectory = directoryResult.exitCode === 0;
@@ -323,7 +202,7 @@ async function executeSbxGrep(
 	if (params.glob) args.push("--glob", params.glob);
 	if (contextLines > 0) args.push("--context", String(contextLines));
 	args.push("--", params.pattern, searchPath);
-	const result = await executeInSandbox(sandbox, cwd, args, { signal, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS });
+	const result = await transport.execute(cwd, args, { signal, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS });
 	if (result.exitCode !== 0 && result.exitCode !== 1) throw commandError(args, result);
 
 	type Record = { filePath: string; line: number; text: string; match: boolean };
@@ -383,7 +262,7 @@ async function executeSbxGrep(
 	return { content: [{ type: "text", text: output }], details: Object.keys(details).length > 0 ? details : undefined };
 }
 
-export default function sbxToolsExtension(pi: ExtensionAPI) {
+export default function piSbxExtension(pi: ExtensionAPI) {
 	const cwd = process.cwd();
 	const localRead = createReadTool(cwd);
 	const localWrite = createWriteTool(cwd);
@@ -395,6 +274,28 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	let sandboxes: SbxSandbox[] = [];
 	let selectedName: string | undefined;
 	let sandboxingEnabled = true;
+	let transport: SbxTransport | undefined;
+	let transportSandbox: string | undefined;
+
+	function disposeTransport(): void {
+		transport?.dispose();
+		transport = undefined;
+		transportSandbox = undefined;
+	}
+
+	function selectedTransport(): SbxTransport | undefined {
+		const sandbox = selectedSandbox();
+		if (!sandbox) {
+			disposeTransport();
+			return undefined;
+		}
+		if (!transport || transportSandbox !== sandbox) {
+			disposeTransport();
+			transport = new SbxTransport(sandbox, cwd);
+			transportSandbox = sandbox;
+		}
+		return transport;
+	}
 
 	function restoredSelection(ctx: ExtensionContext): SelectionState | undefined {
 		let restored: SelectionState | undefined;
@@ -409,7 +310,7 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		if (sandboxingEnabled && selectedName) {
-			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("accent", `sbx: ${selectedName}`));
+			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("muted", `sbx: ${selectedName}`));
 		} else {
 			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("warning", "sbx: host fallback"));
 		}
@@ -421,7 +322,10 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 			throw new Error(result.stderr.trim() || `sbx ls --json exited with code ${result.code}`);
 		}
 		sandboxes = parseMatchingSandboxes(result.stdout, cwd);
-		if (selectedName && !sandboxes.some((sandbox) => sandbox.name === selectedName)) selectedName = undefined;
+		if (selectedName && !sandboxes.some((sandbox) => sandbox.name === selectedName)) {
+			selectedName = undefined;
+			disposeTransport();
+		}
 		updateStatus(ctx);
 		return sandboxes;
 	}
@@ -432,6 +336,7 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 
 	function useHostFallback(ctx: ExtensionContext): void {
 		sandboxingEnabled = false;
+		disposeTransport();
 		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostFallback: true });
 		updateStatus(ctx);
 	}
@@ -439,64 +344,94 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localRead,
 		label: "read (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localRead.execute(id, params, signal, onUpdate);
-			return createReadTool(cwd, { operations: createSbxReadOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localRead.execute(id, params, signal, onUpdate);
+			return createReadTool(cwd, { operations: createSbxReadOps(activeTransport, cwd) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localWrite,
 		label: "write (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localWrite.execute(id, params, signal, onUpdate);
-			return createWriteTool(cwd, { operations: createSbxWriteOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localWrite.execute(id, params, signal, onUpdate);
+			return createWriteTool(cwd, { operations: createSbxWriteOps(activeTransport, cwd) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localEdit,
 		label: "edit (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localEdit.execute(id, params, signal, onUpdate);
-			return createEditTool(cwd, { operations: createSbxEditOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localEdit.execute(id, params, signal, onUpdate);
+			return createEditTool(cwd, { operations: createSbxEditOps(activeTransport, cwd) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localBash,
 		label: "bash (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localBash.execute(id, params, signal, onUpdate);
-			return createBashTool(cwd, { operations: createSbxBashOps(sandbox) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localBash.execute(id, params, signal, onUpdate);
+			return createBashTool(cwd, { operations: createSbxBashOps(activeTransport) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localLs,
 		label: "ls (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localLs.execute(id, params, signal, onUpdate);
-			return createLsTool(cwd, { operations: createSbxLsOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localLs.execute(id, params, signal, onUpdate);
+			return createLsTool(cwd, { operations: createSbxLsOps(activeTransport, cwd) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localFind,
 		label: "find (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localFind.execute(id, params, signal, onUpdate);
-			return createFindTool(cwd, { operations: createSbxFindOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localFind.execute(id, params, signal, onUpdate);
+			return createFindTool(cwd, { operations: createSbxFindOps(activeTransport, cwd) }).execute(
+				id,
+				params,
+				signal,
+				onUpdate,
+			);
 		},
 	});
 	pi.registerTool({
 		...localGrep,
 		label: "grep (sbx/host)",
-		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = selectedSandbox();
-			if (!sandbox) return localGrep.execute(id, params, signal, onUpdate);
-			return executeSbxGrep(sandbox, cwd, params, signal);
+		async execute(id, params, signal, onUpdate) {
+			const activeTransport = selectedTransport();
+			if (!activeTransport) return localGrep.execute(id, params, signal, onUpdate);
+			return executeSbxGrep(activeTransport, cwd, params, signal);
 		},
 	});
 
@@ -509,8 +444,8 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("user_bash", () => {
-		const sandbox = selectedSandbox();
-		return sandbox ? { operations: createSbxBashOps(sandbox) } : undefined;
+		const activeTransport = selectedTransport();
+		return activeTransport ? { operations: createSbxBashOps(activeTransport) } : undefined;
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -520,6 +455,8 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do.";
 		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
 	});
+
+	pi.on("session_shutdown", () => disposeTransport());
 
 	pi.on("session_start", async (_event, ctx) => {
 		const restored = restoredSelection(ctx);
@@ -588,8 +525,10 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const index = labels.indexOf(choice) - 1;
-			selectedName = sandboxes[index]?.name;
-			if (!selectedName) return;
+			const nextName = sandboxes[index]?.name;
+			if (!nextName) return;
+			if (selectedName !== nextName) disposeTransport();
+			selectedName = nextName;
 			sandboxingEnabled = true;
 			pi.appendEntry<SelectionState>(STATE_ENTRY, { name: selectedName });
 			updateStatus(ctx);

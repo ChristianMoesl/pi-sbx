@@ -29,7 +29,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/sbx-tools/index.ts"
+      "./extensions/pi-sbx/index.ts"
     ]
   },
   "peerDependencies": {

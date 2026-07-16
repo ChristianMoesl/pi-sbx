@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseMatchingSandboxes } from "../extensions/sbx-tools/discovery.ts";
+import { parseMatchingSandboxes } from "../extensions/pi-sbx/discovery.ts";
 
 const cwd = "/Users/example/work/repo/feature";
 
