@@ -124,13 +124,24 @@ function createSbxLsOps(transport: SbxTransport, cwd: string): LsOperations {
 		},
 		readdir: async (dirPath) => {
 			const script = [
-				"import json, os, sys",
-				"root = sys.argv[1]",
-				"items = [{'name': name, 'directory': os.path.isdir(os.path.join(root, name))} for name in os.listdir(root)]",
-				"json.dump(items, sys.stdout)",
-			].join("; ");
-			const result = await successfulExec(transport, cwd, ["python3", "-c", script, dirPath]);
-			const entries = JSON.parse(result.stdout.toString()) as Array<{ name: string; directory: boolean }>;
+				'root=$1',
+				'for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do',
+				'  if [ -e "$entry" ] || [ -L "$entry" ]; then',
+				'    name=${entry##*/}',
+				'    if [ -d "$entry" ]; then kind=d; else kind=f; fi',
+				'    printf "%s\\0%s\\0" "$name" "$kind"',
+				'  fi',
+				'done',
+			].join("\n");
+			const result = await successfulExec(transport, cwd, ["sh", "-c", script, "sbx-ls", dirPath]);
+			const fields = result.stdout.toString().split("\0");
+			fields.pop();
+			const entries: Array<{ name: string; directory: boolean }> = [];
+			for (let index = 0; index < fields.length; index += 2) {
+				const name = fields[index];
+				if (name === undefined) continue;
+				entries.push({ name, directory: fields[index + 1] === "d" });
+			}
 			for (const entry of entries) directoryCache.set(path.join(dirPath, entry.name), entry.directory);
 			return entries.map((entry) => entry.name);
 		},

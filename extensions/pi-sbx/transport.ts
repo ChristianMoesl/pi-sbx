@@ -52,135 +52,108 @@ interface PendingExecution {
 export type SpawnWorker = (sandbox: string, cwd: string) => ChildProcessWithoutNullStreams;
 
 export const SBX_WORKER_SCRIPT = String.raw`
-import base64
-import json
-import os
-import signal
-import subprocess
-import sys
-import threading
+const { spawn } = require("node:child_process");
+const readline = require("node:readline");
 
-output_lock = threading.Lock()
-process_lock = threading.Lock()
-processes = {}
-cancelled = set()
+const processes = new Map();
+const cancelled = new Set();
 
+function emit(message) {
+    process.stdout.write(JSON.stringify(message) + "\n");
+}
 
-def emit(message):
-    encoded = json.dumps(message, separators=(",", ":"))
-    with output_lock:
-        sys.stdout.write(encoded + "\n")
-        sys.stdout.flush()
+function emitBuffer(type, id, data) {
+    emit({ type, id, data: data.toString("base64") });
+}
 
+function killProcess(child) {
+    if (!child.pid) return;
+    try {
+        process.kill(-child.pid, "SIGKILL");
+    } catch {
+        try {
+            child.kill("SIGKILL");
+        } catch {
+            // The process already exited.
+        }
+    }
+}
 
-def emit_bytes(event_type, request_id, data):
-    emit({"type": event_type, "id": request_id, "data": base64.b64encode(data).decode("ascii")})
+function execute(request) {
+    const id = request.id;
+    if (cancelled.delete(id)) {
+        emit({ type: "error", id, message: "aborted" });
+        return;
+    }
 
+    let child;
+    try {
+        child = spawn(request.command[0], request.command.slice(1), {
+            cwd: request.cwd,
+            detached: true,
+            stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        });
+    } catch (error) {
+        emit({ type: "error", id, message: error instanceof Error ? error.message : String(error) });
+        return;
+    }
 
-def pump(stream, event_type, request_id):
-    while True:
-        chunk = os.read(stream.fileno(), 65536)
-        if not chunk:
-            return
-        emit_bytes(event_type, request_id, chunk)
+    processes.set(id, child);
+    if (cancelled.delete(id)) killProcess(child);
 
+    let settled = false;
+    const finish = (exitCode) => {
+        if (settled) return;
+        settled = true;
+        processes.delete(id);
+        cancelled.delete(id);
+        emit({ type: "result", id, exitCode });
+    };
 
-def kill_process(process):
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            pass
+    child.stdout.on("data", (data) => emitBuffer("stdout", id, data));
+    child.stderr.on("data", (data) => emitBuffer("stderr", id, data));
+    child.on("error", (error) => {
+        emitBuffer("stderr", id, Buffer.from(error.message + "\n"));
+        finish(error.code === "ENOENT" ? 127 : 126);
+    });
+    child.on("close", (exitCode) => finish(exitCode));
 
+    if (child.stdin) {
+        child.stdin.on("error", () => {});
+        child.stdin.end(Buffer.from(request.input, "base64"));
+    }
+}
 
-def execute(request):
-    request_id = request["id"]
-    process = None
-    try:
-        with process_lock:
-            if request_id in cancelled:
-                cancelled.discard(request_id)
-                emit({"type": "error", "id": request_id, "message": "aborted"})
-                return
+function cancel(id) {
+    const child = processes.get(id);
+    if (child) killProcess(child);
+    else cancelled.add(id);
+}
 
-        input_value = request.get("input")
-        process = subprocess.Popen(
-            request["command"],
-            cwd=request["cwd"],
-            stdin=subprocess.PIPE if input_value is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        with process_lock:
-            processes[request_id] = process
-            should_cancel = request_id in cancelled
-            cancelled.discard(request_id)
-        if should_cancel:
-            kill_process(process)
+function shutdown() {
+    for (const child of processes.values()) killProcess(child);
+}
 
-        stdout_thread = threading.Thread(target=pump, args=(process.stdout, "stdout", request_id), daemon=True)
-        stderr_thread = threading.Thread(target=pump, args=(process.stderr, "stderr", request_id), daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
+process.once("SIGTERM", shutdown);
+process.once("SIGHUP", shutdown);
+process.once("exit", shutdown);
 
-        if input_value is not None and process.stdin is not None:
-            try:
-                process.stdin.write(base64.b64decode(input_value))
-            except BrokenPipeError:
-                pass
-            finally:
-                process.stdin.close()
-
-        exit_code = process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        emit({"type": "result", "id": request_id, "exitCode": exit_code})
-    except FileNotFoundError as error:
-        emit_bytes("stderr", request_id, (str(error) + "\n").encode())
-        emit({"type": "result", "id": request_id, "exitCode": 127})
-    except PermissionError as error:
-        emit_bytes("stderr", request_id, (str(error) + "\n").encode())
-        emit({"type": "result", "id": request_id, "exitCode": 126})
-    except Exception as error:
-        emit({"type": "error", "id": request_id, "message": str(error)})
-    finally:
-        with process_lock:
-            processes.pop(request_id, None)
-            cancelled.discard(request_id)
-
-
-def cancel(request_id):
-    with process_lock:
-        cancelled.add(request_id)
-        process = processes.get(request_id)
-    if process is not None:
-        kill_process(process)
-
-
-emit({"type": "ready"})
-for line in sys.stdin:
-    try:
-        request = json.loads(line)
-        if request.get("type") == "exec":
-            threading.Thread(target=execute, args=(request,), daemon=True).start()
-        elif request.get("type") == "cancel":
-            cancel(request["id"])
-    except Exception as error:
-        emit({"type": "error", "id": "", "message": str(error)})
-
-with process_lock:
-    remaining_processes = list(processes.values())
-for process in remaining_processes:
-    kill_process(process)
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on("line", (line) => {
+    try {
+        const request = JSON.parse(line);
+        if (request.type === "exec") execute(request);
+        else if (request.type === "cancel") cancel(request.id);
+    } catch (error) {
+        emit({ type: "error", id: "", message: error instanceof Error ? error.message : String(error) });
+    }
+});
+input.on("close", shutdown);
+emit({ type: "ready" });
 `;
 
 function spawnSbxWorker(sandbox: string, cwd: string): ChildProcessWithoutNullStreams {
-	return spawn("sbx", ["exec", "-i", "--workdir", cwd, sandbox, "python3", "-u", "-c", SBX_WORKER_SCRIPT], {
+	return spawn("sbx", ["exec", "-i", "--workdir", cwd, sandbox, "node", "-e", SBX_WORKER_SCRIPT], {
 		detached: true,
 		stdio: ["pipe", "pipe", "pipe"],
 	});

@@ -11,7 +11,7 @@ Running Pi itself in a sandbox means mounting its configuration, provider creden
 - Pi with Node.js 24 or newer
 - To use sandboxing: Docker `sbx` available on the host
 - To use sandboxing: an SBX sandbox that mounts Pi's current working directory at the same absolute path
-- To use sandboxing: `sh`, `python3`, `rg`, and `file` in the sandbox image
+- To use sandboxing: Node.js, `sh`, `rg`, and `file` in the sandbox image
 
 Without SBX, the extension remains usable and leaves Pi's standard host tools unchanged.
 

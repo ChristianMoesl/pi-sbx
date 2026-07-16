@@ -4,7 +4,7 @@ import test from "node:test";
 import { SBX_WORKER_SCRIPT, SbxTransport, type SpawnWorker } from "../extensions/pi-sbx/transport.ts";
 
 const spawnLocalWorker: SpawnWorker = () =>
-	spawn("python3", ["-u", "-c", SBX_WORKER_SCRIPT], {
+	spawn(process.execPath, ["-e", SBX_WORKER_SCRIPT], {
 		detached: true,
 		stdio: ["pipe", "pipe", "pipe"],
 	});
@@ -56,7 +56,7 @@ test("reports a missing executable as a command failure", async (t) => {
 
 	const result = await transport.execute(process.cwd(), ["pi-sbx-command-that-does-not-exist"]);
 	assert.equal(result.exitCode, 127);
-	assert.match(result.stderr.toString(), /No such file or directory/);
+	assert.match(result.stderr.toString(), /ENOENT/);
 });
 
 test("streams output before a command exits", async (t) => {
