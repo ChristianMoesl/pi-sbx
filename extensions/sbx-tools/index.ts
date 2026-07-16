@@ -408,7 +408,7 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 		if (selectedName) {
 			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("accent", `sbx: ${selectedName}`));
 		} else {
-			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("error", "sbx: unavailable"));
+			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("warning", "sbx: host fallback"));
 		}
 	}
 
@@ -423,83 +423,91 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 		return sandboxes;
 	}
 
-	function requireSandbox(): string {
-		if (!selectedName) {
-			throw new Error(`No sbx sandbox mounts the Pi working directory: ${cwd}. Run /sbx after creating one.`);
-		}
+	function selectedSandbox(): string | undefined {
 		return selectedName;
 	}
 
 	pi.registerTool({
 		...localRead,
-		label: "read (sbx)",
+		label: "read (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localRead.execute(id, params, signal, onUpdate);
 			return createReadTool(cwd, { operations: createSbxReadOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localWrite,
-		label: "write (sbx)",
+		label: "write (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localWrite.execute(id, params, signal, onUpdate);
 			return createWriteTool(cwd, { operations: createSbxWriteOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localEdit,
-		label: "edit (sbx)",
+		label: "edit (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localEdit.execute(id, params, signal, onUpdate);
 			return createEditTool(cwd, { operations: createSbxEditOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localBash,
-		label: "bash (sbx)",
+		label: "bash (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localBash.execute(id, params, signal, onUpdate);
 			return createBashTool(cwd, { operations: createSbxBashOps(sandbox) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localLs,
-		label: "ls (sbx)",
+		label: "ls (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localLs.execute(id, params, signal, onUpdate);
 			return createLsTool(cwd, { operations: createSbxLsOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localFind,
-		label: "find (sbx)",
+		label: "find (sbx/host)",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const sandbox = requireSandbox();
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localFind.execute(id, params, signal, onUpdate);
 			return createFindTool(cwd, { operations: createSbxFindOps(sandbox, cwd) }).execute(id, params, signal, onUpdate);
 		},
 	});
 	pi.registerTool({
 		...localGrep,
-		label: "grep (sbx)",
-		async execute(_id, params, signal) {
-			return executeSbxGrep(requireSandbox(), cwd, params, signal);
+		label: "grep (sbx/host)",
+		async execute(id, params, signal, onUpdate, ctx) {
+			const sandbox = selectedSandbox();
+			if (!sandbox) return localGrep.execute(id, params, signal, onUpdate);
+			return executeSbxGrep(sandbox, cwd, params, signal);
 		},
 	});
 
 	pi.on("tool_call", (event) => {
-		if (ROUTED_TOOLS.has(event.toolName)) return;
+		if (!selectedSandbox() || ROUTED_TOOLS.has(event.toolName)) return;
 		return {
 			block: true,
-			reason: `Tool ${event.toolName} is not sandbox-aware. This extension fails closed instead of running it on the host.`,
+			reason: `Tool ${event.toolName} is not sandbox-aware and cannot run in the selected sbx sandbox.`,
 		};
 	});
 
-	pi.on("user_bash", () => ({ operations: createSbxBashOps(requireSandbox()) }));
+	pi.on("user_bash", () => {
+		const sandbox = selectedSandbox();
+		return sandbox ? { operations: createSbxBashOps(sandbox) } : undefined;
+	});
 
 	pi.on("before_agent_start", (event) => {
 		const environment = selectedName
 			? `Tool execution environment: sbx sandbox ${selectedName}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`
-			: "Tool execution environment: unavailable. Tool calls will fail closed until a matching sbx sandbox is selected with /sbx.";
+			: "Tool execution environment: host fallback. No matching sbx sandbox is available, so Pi tools run directly on the host as they normally do.";
 		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
 	});
 
@@ -510,7 +518,7 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 			selectedName = sandboxes.find((sandbox) => sandbox.name === restored)?.name ?? sandboxes[0]?.name;
 			updateStatus(ctx);
 			if (!selectedName) {
-				ctx.ui.notify(`No sbx sandbox mounts ${cwd}. Tool calls will fail closed.`, "warning");
+				ctx.ui.notify(`No sbx sandbox mounts ${cwd}. Tool calls will run on the host.`, "warning");
 			}
 		} catch (error) {
 			selectedName = undefined;
@@ -530,7 +538,7 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (sandboxes.length === 0) {
-				ctx.ui.notify(`No sbx sandbox mounts ${cwd}.`, "warning");
+				ctx.ui.notify(`No sbx sandbox mounts ${cwd}; tool calls will run on the host.`, "warning");
 				return;
 			}
 			const labels = sandboxes.map((sandbox) => {

@@ -9,9 +9,11 @@ Running Pi itself in a sandbox means mounting its configuration, provider creden
 ## Requirements
 
 - Pi with Node.js 24 or newer
-- Docker `sbx` available on the host
-- An SBX sandbox that mounts Pi's current working directory at the same absolute path
-- `sh`, `python3`, `rg`, and `file` in the sandbox image
+- To use sandboxing: Docker `sbx` available on the host
+- To use sandboxing: an SBX sandbox that mounts Pi's current working directory at the same absolute path
+- To use sandboxing: `sh`, `python3`, `rg`, and `file` in the sandbox image
+
+Without SBX, the extension remains usable and leaves Pi's standard host tools unchanged.
 
 The extension is currently designed and tested for macOS hosts and Linux SBX sandboxes.
 
@@ -81,14 +83,15 @@ The extension routes these built-in tools through `sbx exec`:
 - `ls`
 - interactive `!` commands
 
-If no matching sandbox exists, tool execution fails closed.
+If no matching sandbox exists—or `sbx` cannot be discovered—the extension falls back to Pi's normal host tools. In host-fallback mode, third-party tools are not blocked and interactive `!` commands also run normally on the host.
 
 ## Security model
 
 - Pi and model-provider communication remain on the host.
 - Built-in shell and filesystem operations run in the selected sandbox.
 - Host environment variables are not forwarded to sandboxed shell commands.
-- Unknown third-party tools are blocked because Pi cannot transparently move arbitrary extension implementations into SBX.
+- While an SBX sandbox is selected, unknown third-party tools are blocked because Pi cannot transparently move arbitrary extension implementations into SBX.
+- When no sandbox is available, Pi's normal host-tool behavior is preserved, including third-party tools.
 - Do not combine `pi-sbx` with another extension that overrides the same built-in tool names.
 
 Provide required secrets through SBX policy or secret mechanisms instead of exposing the host Pi agent directory.
