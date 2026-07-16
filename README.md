@@ -19,27 +19,24 @@ The extension is currently designed and tested for macOS hosts and Linux SBX san
 
 ## Install
 
-Install globally from GitHub so the extension is available in every Pi project:
+Install the package globally so the extension is available in every Pi project:
 
 ```sh
-pi install git:github.com/ChristianMoesl/pi-sbx
+pi install npm:@christianmoesl/pi-sbx
 ```
 
-Restart Pi after installation. Confirm the package is registered with:
-
-```sh
-pi list
-```
+Restart Pi after installation. Confirm the package is registered with `pi list`.
 
 To try it for one Pi process without installing it:
 
 ```sh
-pi -e git:github.com/ChristianMoesl/pi-sbx
+pi -e npm:@christianmoesl/pi-sbx
 ```
 
-For local development, point Pi directly at a checkout:
+You can also install directly from GitHub or a local checkout:
 
 ```sh
+pi install git:github.com/ChristianMoesl/pi-sbx
 pi install /absolute/path/to/pi-sbx
 ```
 
@@ -98,17 +95,19 @@ Provide required secrets through SBX policy or secret mechanisms instead of expo
 
 ## Update and remove
 
-Update an unpinned Git installation:
+Update installed Pi packages:
 
 ```sh
 pi update --extensions
 ```
 
-Remove the package:
+Remove the npm package:
 
 ```sh
-pi remove git:github.com/ChristianMoesl/pi-sbx
+pi remove npm:@christianmoesl/pi-sbx
 ```
+
+For a Git installation, use `pi remove git:github.com/ChristianMoesl/pi-sbx` instead.
 
 ## Development
 
