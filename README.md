@@ -70,7 +70,7 @@ The selected sandbox appears in Pi's footer:
 sbx: my-workspace
 ```
 
-Run `/sbx` to refresh discovery and switch the sandbox used for tool execution.
+Run `/sbx` to refresh discovery and switch the sandbox used for tool execution. Select **Host (disable sandboxing)** in that menu, or run `/sbx off`, to disable sandboxing for the current session. Run `/sbx on` to re-enable the previously selected sandbox.
 
 The extension routes these built-in tools through `sbx exec`:
 

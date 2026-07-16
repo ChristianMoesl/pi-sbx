@@ -31,7 +31,8 @@ const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
 const DEFAULT_GREP_LIMIT = 100;
 
 interface SelectionState {
-	name: string;
+	name?: string;
+	hostFallback?: boolean;
 }
 
 interface SbxExecResult {
@@ -393,19 +394,21 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	const localGrep = createGrepTool(cwd);
 	let sandboxes: SbxSandbox[] = [];
 	let selectedName: string | undefined;
+	let sandboxingEnabled = true;
 
-	function restoredSelection(ctx: ExtensionContext): string | undefined {
-		let restored: string | undefined;
+	function restoredSelection(ctx: ExtensionContext): SelectionState | undefined {
+		let restored: SelectionState | undefined;
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
 			const data = entry.data as SelectionState | undefined;
-			if (typeof data?.name === "string") restored = data.name;
+			if (typeof data?.name === "string") restored = { name: data.name };
+			else if (data?.hostFallback === true) restored = { hostFallback: true };
 		}
 		return restored;
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
-		if (selectedName) {
+		if (sandboxingEnabled && selectedName) {
 			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("accent", `sbx: ${selectedName}`));
 		} else {
 			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("warning", "sbx: host fallback"));
@@ -424,7 +427,13 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	}
 
 	function selectedSandbox(): string | undefined {
-		return selectedName;
+		return sandboxingEnabled ? selectedName : undefined;
+	}
+
+	function useHostFallback(ctx: ExtensionContext): void {
+		sandboxingEnabled = false;
+		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostFallback: true });
+		updateStatus(ctx);
 	}
 
 	pi.registerTool({
@@ -505,52 +514,83 @@ export default function sbxToolsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
-		const environment = selectedName
-			? `Tool execution environment: sbx sandbox ${selectedName}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`
-			: "Tool execution environment: host fallback. No matching sbx sandbox is available, so Pi tools run directly on the host as they normally do.";
+		const sandbox = selectedSandbox();
+		const environment = sandbox
+			? `Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`
+			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do.";
 		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		const restored = restoredSelection(ctx);
+		sandboxingEnabled = restored?.hostFallback !== true;
 		try {
 			await discover(ctx);
-			const restored = restoredSelection(ctx);
-			selectedName = sandboxes.find((sandbox) => sandbox.name === restored)?.name ?? sandboxes[0]?.name;
+			if (sandboxingEnabled) {
+				selectedName = sandboxes.find((sandbox) => sandbox.name === restored?.name)?.name ?? sandboxes[0]?.name;
+			}
 			updateStatus(ctx);
-			if (!selectedName) {
-				ctx.ui.notify(`No sbx sandbox mounts ${cwd}. Tool calls will run on the host.`, "warning");
+			if (!selectedSandbox()) {
+				ctx.ui.notify(`No sbx sandbox is active for ${cwd}. Tool calls will run on the host.`, "warning");
 			}
 		} catch (error) {
 			selectedName = undefined;
 			updateStatus(ctx);
-			ctx.ui.notify(`Could not discover sbx sandboxes: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(`Could not discover sbx sandboxes; tool calls will run on the host: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
 	});
 
 	pi.registerCommand("sbx", {
-		description: "Select the sbx sandbox used for tool execution",
-		handler: async (_args, ctx) => {
+		description: "Select an sbx sandbox, or use /sbx off to run tools on the host",
+		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
+			const action = args.trim().toLowerCase();
+			if (action === "off" || action === "host") {
+				useHostFallback(ctx);
+				ctx.ui.notify("Sandboxing disabled for this session; tool calls now run on the host.", "info");
+				return;
+			}
+			if (action && action !== "on") {
+				ctx.ui.notify("Usage: /sbx, /sbx on, or /sbx off", "warning");
+				return;
+			}
 			try {
 				await discover(ctx);
 			} catch (error) {
-				ctx.ui.notify(`Could not discover sbx sandboxes: ${error instanceof Error ? error.message : String(error)}`, "error");
+				useHostFallback(ctx);
+				ctx.ui.notify(`Could not discover sbx sandboxes; tool calls will run on the host: ${error instanceof Error ? error.message : String(error)}`, "warning");
 				return;
 			}
 			if (sandboxes.length === 0) {
 				ctx.ui.notify(`No sbx sandbox mounts ${cwd}; tool calls will run on the host.`, "warning");
 				return;
 			}
-			const labels = sandboxes.map((sandbox) => {
-				const selected = sandbox.name === selectedName ? " • selected" : "";
-				return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
-			});
-			const choice = await ctx.ui.select("Tool execution sandbox", labels);
+			if (action === "on" && selectedName && sandboxes.some((sandbox) => sandbox.name === selectedName)) {
+				sandboxingEnabled = true;
+				pi.appendEntry<SelectionState>(STATE_ENTRY, { name: selectedName });
+				updateStatus(ctx);
+				ctx.ui.notify(`Tool calls now execute in ${selectedName}.`, "info");
+				return;
+			}
+			const hostLabel = "Host (disable sandboxing)";
+			const labels = [
+				hostLabel,
+				...sandboxes.map((sandbox) => {
+					const selected = sandboxingEnabled && sandbox.name === selectedName ? " • selected" : "";
+					return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
+				}),
+			];
+			const choice = await ctx.ui.select("Tool execution environment", labels);
 			if (!choice) return;
-			const index = labels.indexOf(choice);
-			if (index < 0) return;
+			if (choice === hostLabel) {
+				useHostFallback(ctx);
+				ctx.ui.notify("Sandboxing disabled for this session; tool calls now run on the host.", "info");
+				return;
+			}
+			const index = labels.indexOf(choice) - 1;
 			selectedName = sandboxes[index]?.name;
 			if (!selectedName) return;
+			sandboxingEnabled = true;
 			pi.appendEntry<SelectionState>(STATE_ENTRY, { name: selectedName });
 			updateStatus(ctx);
 			ctx.ui.notify(`Tool calls now execute in ${selectedName}.`, "info");
