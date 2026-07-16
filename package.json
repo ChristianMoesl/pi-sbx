@@ -1,0 +1,49 @@
+{
+  "name": "@christianmoesl/pi-sbx",
+  "version": "0.1.0",
+  "description": "Run Pi coding-agent tool calls inside Docker sbx sandboxes",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "docker",
+    "sbx",
+    "sandbox"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChristianMoesl/pi-sbx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ChristianMoesl/pi-sbx/issues"
+  },
+  "homepage": "https://github.com/ChristianMoesl/pi-sbx#readme",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "extensions",
+    "LICENSE",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/sbx-tools/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "smoke": "pi --no-extensions -e . --offline --list-models __pi_sbx_smoke__",
+    "check": "npm run typecheck && npm test && npm run smoke"
+  }
+}
