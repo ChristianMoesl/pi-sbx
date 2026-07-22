@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -22,6 +23,7 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { parseMatchingSandboxes, type SbxSandbox } from "./discovery.ts";
+import { resolveHostSkillReadPath } from "./skill-access.ts";
 import { SbxTransport, type SbxExecOptions, type SbxExecResult } from "./transport.ts";
 
 const STATUS_ID = "pi-sbx";
@@ -275,6 +277,7 @@ async function executeSbxGrep(
 
 export default function piSbxExtension(pi: ExtensionAPI) {
 	const cwd = process.cwd();
+	const hostSkillsRoot = path.join(homedir(), ".pi", "agent", "skills");
 	const localRead = createReadTool(cwd);
 	const localWrite = createWriteTool(cwd);
 	const localEdit = createEditTool(cwd);
@@ -358,6 +361,10 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 		async execute(id, params, signal, onUpdate) {
 			const activeTransport = selectedTransport();
 			if (!activeTransport) return localRead.execute(id, params, signal, onUpdate);
+			const hostSkillPath = await resolveHostSkillReadPath(params.path, cwd, hostSkillsRoot);
+			if (hostSkillPath) {
+				return localRead.execute(id, { ...params, path: hostSkillPath }, signal, onUpdate);
+			}
 			return createReadTool(cwd, { operations: createSbxReadOps(activeTransport, cwd) }).execute(
 				id,
 				params,

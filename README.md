@@ -72,7 +72,7 @@ Run `/sbx` to refresh discovery and switch the sandbox used for tool execution. 
 The extension routes these built-in tools through `sbx exec`:
 
 - `bash`
-- `read`
+- `read` (except read-only access to host skill files under `~/.pi/agent/skills`)
 - `write`
 - `edit`
 - `grep`
@@ -86,6 +86,7 @@ If no matching sandbox exists—or `sbx` cannot be discovered—the extension fa
 
 - Pi and model-provider communication remain on the host.
 - Built-in shell and filesystem operations run in the selected sandbox.
+- The `read` tool may read regular files from the host under `~/.pi/agent/skills`, allowing Pi to load installed skills and their supporting files. Canonical-path checks reject traversal and symlink escapes; other Pi agent files remain inaccessible.
 - Host environment variables are not forwarded to sandboxed shell commands.
 - While an SBX sandbox is selected, unknown third-party tools are blocked because Pi cannot transparently move arbitrary extension implementations into SBX.
 - When no sandbox is available, Pi's normal host-tool behavior is preserved, including third-party tools.
