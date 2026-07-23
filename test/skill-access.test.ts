@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -18,7 +18,7 @@ test("allows regular files below the host skills root", async (t) => {
 	const skillFile = path.join(skillsRoot, "example", "SKILL.md");
 	await writeFile(skillFile, "# Example\n");
 
-	assert.equal(await resolveHostSkillReadPath(skillFile, root, skillsRoot), skillFile);
+	assert.equal(await resolveHostSkillReadPath(skillFile, root, skillsRoot), await realpath(skillFile));
 });
 
 test("leaves paths outside the host skills root in the sandbox", async (t) => {
