@@ -1,6 +1,6 @@
-import { homedir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
 	type BashOperations,
 	createBashTool,
@@ -23,7 +23,7 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { parseMatchingSandboxes, type SbxSandbox } from "./discovery.ts";
-import { resolveHostSkillReadPath } from "./skill-access.ts";
+import { type DiscoveredSkillPath, resolveHostSkillReadPath } from "./skill-access.ts";
 import { SbxTransport, type SbxExecOptions, type SbxExecResult } from "./transport.ts";
 
 const STATUS_ID = "pi-sbx";
@@ -31,10 +31,52 @@ const STATE_ENTRY = "pi-sbx-selection";
 const ROUTED_TOOLS = new Set(["bash", "edit", "find", "grep", "ls", "read", "write"]);
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
 const DEFAULT_GREP_LIMIT = 100;
+const EXECUTION_TARGET_DESCRIPTION =
+	'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires user approval while sandboxing is active.';
+
+export type ExecutionTarget = "sandbox" | "host";
+
+type WithExecutionTarget<T> = T & { execution_target?: ExecutionTarget };
 
 interface SelectionState {
 	name?: string;
 	hostFallback?: boolean;
+}
+
+export function withExecutionTarget<T extends Type.TProperties>(schema: Type.TObject<T>) {
+	return Type.Object({
+		...schema.properties,
+		execution_target: Type.Optional(
+			Type.Unsafe<ExecutionTarget>({
+				type: "string",
+				enum: ["sandbox", "host"],
+				description: EXECUTION_TARGET_DESCRIPTION,
+			}),
+		),
+	});
+}
+
+export function withoutExecutionTarget<T extends { execution_target?: ExecutionTarget }>(
+	params: T,
+): Omit<T, "execution_target"> {
+	const { execution_target: _executionTarget, ...toolParams } = params;
+	return toolParams;
+}
+
+function hostRequestFingerprint(toolName: string, input: Record<string, unknown>): string {
+	return JSON.stringify([toolName, withoutExecutionTarget(input as WithExecutionTarget<Record<string, unknown>>)]);
+}
+
+export function hostApprovalMessage(toolName: string, input: Record<string, unknown>, cwd: string): string {
+	return [
+		`Tool: ${toolName}`,
+		`Working directory: ${cwd}`,
+		"",
+		"Arguments:",
+		JSON.stringify(withoutExecutionTarget(input as WithExecutionTarget<Record<string, unknown>>), null, 2),
+		"",
+		"This operation will run outside the selected sbx sandbox with the host process's permissions and environment.",
+	].join("\n");
 }
 
 function commandError(command: string[], result: SbxExecResult): Error {
@@ -277,7 +319,6 @@ async function executeSbxGrep(
 
 export default function piSbxExtension(pi: ExtensionAPI) {
 	const cwd = process.cwd();
-	const hostSkillsRoot = path.join(homedir(), ".pi", "agent", "skills");
 	const localRead = createReadTool(cwd);
 	const localWrite = createWriteTool(cwd);
 	const localEdit = createEditTool(cwd);
@@ -290,6 +331,8 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	let sandboxingEnabled = true;
 	let transport: SbxTransport | undefined;
 	let transportSandbox: string | undefined;
+	let discoveredSkills: DiscoveredSkillPath[] = [];
+	const approvedHostCalls = new Map<string, string>();
 
 	function disposeTransport(): void {
 		transport?.dispose();
@@ -355,19 +398,34 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
+	function requireApprovedHostExecution(toolName: string, id: string, params: Record<string, unknown>): void {
+		if (!selectedSandbox()) return;
+		const approvedFingerprint = approvedHostCalls.get(id);
+		approvedHostCalls.delete(id);
+		if (approvedFingerprint !== hostRequestFingerprint(toolName, params)) {
+			throw new Error("Host execution was not approved for this exact tool call.");
+		}
+	}
+
 	pi.registerTool({
 		...localRead,
 		label: "read (sbx/host)",
+		parameters: withExecutionTarget(localRead.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localRead.name, id, params);
+				return localRead.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localRead.execute(id, params, signal, onUpdate);
-			const hostSkillPath = await resolveHostSkillReadPath(params.path, cwd, hostSkillsRoot);
+			if (!activeTransport) return localRead.execute(id, toolParams, signal, onUpdate);
+			const hostSkillPath = await resolveHostSkillReadPath(toolParams.path, cwd, discoveredSkills);
 			if (hostSkillPath) {
-				return localRead.execute(id, { ...params, path: hostSkillPath }, signal, onUpdate);
+				return localRead.execute(id, { ...toolParams, path: hostSkillPath }, signal, onUpdate);
 			}
 			return createReadTool(cwd, { operations: createSbxReadOps(activeTransport, cwd) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -376,12 +434,18 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localWrite,
 		label: "write (sbx/host)",
+		parameters: withExecutionTarget(localWrite.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localWrite.name, id, params);
+				return localWrite.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localWrite.execute(id, params, signal, onUpdate);
+			if (!activeTransport) return localWrite.execute(id, toolParams, signal, onUpdate);
 			return createWriteTool(cwd, { operations: createSbxWriteOps(activeTransport, cwd) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -390,12 +454,18 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localEdit,
 		label: "edit (sbx/host)",
+		parameters: withExecutionTarget(localEdit.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localEdit.name, id, params);
+				return localEdit.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localEdit.execute(id, params, signal, onUpdate);
+			if (!activeTransport) return localEdit.execute(id, toolParams, signal, onUpdate);
 			return createEditTool(cwd, { operations: createSbxEditOps(activeTransport, cwd) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -404,12 +474,18 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localBash,
 		label: "bash (sbx/host)",
+		parameters: withExecutionTarget(localBash.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localBash.name, id, params);
+				return localBash.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localBash.execute(id, params, signal, onUpdate);
+			if (!activeTransport) return localBash.execute(id, toolParams, signal, onUpdate);
 			return createBashTool(cwd, { operations: createSbxBashOps(activeTransport) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -418,12 +494,18 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localLs,
 		label: "ls (sbx/host)",
+		parameters: withExecutionTarget(localLs.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localLs.name, id, params);
+				return localLs.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localLs.execute(id, params, signal, onUpdate);
+			if (!activeTransport) return localLs.execute(id, toolParams, signal, onUpdate);
 			return createLsTool(cwd, { operations: createSbxLsOps(activeTransport, cwd) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -432,12 +514,18 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localFind,
 		label: "find (sbx/host)",
+		parameters: withExecutionTarget(localFind.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localFind.name, id, params);
+				return localFind.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localFind.execute(id, params, signal, onUpdate);
+			if (!activeTransport) return localFind.execute(id, toolParams, signal, onUpdate);
 			return createFindTool(cwd, { operations: createSbxFindOps(activeTransport, cwd) }).execute(
 				id,
-				params,
+				toolParams,
 				signal,
 				onUpdate,
 			);
@@ -446,19 +534,42 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...localGrep,
 		label: "grep (sbx/host)",
+		parameters: withExecutionTarget(localGrep.parameters),
 		async execute(id, params, signal, onUpdate) {
+			const toolParams = withoutExecutionTarget(params);
+			if (params.execution_target === "host") {
+				requireApprovedHostExecution(localGrep.name, id, params);
+				return localGrep.execute(id, toolParams, signal, onUpdate);
+			}
 			const activeTransport = selectedTransport();
-			if (!activeTransport) return localGrep.execute(id, params, signal, onUpdate);
-			return executeSbxGrep(activeTransport, cwd, params, signal);
+			if (!activeTransport) return localGrep.execute(id, toolParams, signal, onUpdate);
+			return executeSbxGrep(activeTransport, cwd, toolParams, signal);
 		},
 	});
 
-	pi.on("tool_call", (event) => {
-		if (!selectedSandbox() || ROUTED_TOOLS.has(event.toolName)) return;
-		return {
-			block: true,
-			reason: `Tool ${event.toolName} is not sandbox-aware and cannot run in the selected sbx sandbox.`,
-		};
+	pi.on("tool_call", async (event, ctx) => {
+		if (!selectedSandbox()) return;
+		if (!ROUTED_TOOLS.has(event.toolName)) {
+			return {
+				block: true,
+				reason: `Tool ${event.toolName} is not sandbox-aware and cannot run in the selected sbx sandbox.`,
+			};
+		}
+		const input = event.input as Record<string, unknown>;
+		if (input.execution_target !== "host") return;
+		if (!ctx.hasUI) {
+			return { block: true, reason: "Host execution requires user approval, but no interactive UI is available." };
+		}
+		const approved = await ctx.ui.confirm(
+			"Allow host execution?",
+			hostApprovalMessage(event.toolName, input, cwd),
+		);
+		if (!approved) return { block: true, reason: "Host execution was denied by the user." };
+		approvedHostCalls.set(event.toolCallId, hostRequestFingerprint(event.toolName, input));
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		approvedHostCalls.delete(event.toolCallId);
 	});
 
 	pi.on("user_bash", () => {
@@ -467,14 +578,25 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
+		discoveredSkills = (event.systemPromptOptions?.skills ?? []).map(({ filePath, baseDir }) => ({
+			filePath,
+			baseDir,
+		}));
 		const sandbox = selectedSandbox();
 		const environment = sandbox
-			? `Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`
-			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do.";
+			? [
+					`Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`,
+					'Routed built-in tools accept execution_target: "sandbox" | "host". Omit execution_target or use "sandbox" normally. Use "host" only when absolutely necessary and sandbox execution cannot perform the operation. Every host-targeted tool call requires explicit user approval and interrupts the user, so avoid unnecessary or repeated host requests.',
+				].join("\n")
+			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do. execution_target does not require approval in this mode.";
 		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
 	});
 
-	pi.on("session_shutdown", () => disposeTransport());
+	pi.on("session_shutdown", () => {
+		approvedHostCalls.clear();
+		discoveredSkills = [];
+		disposeTransport();
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		const restored = restoredSelection(ctx);

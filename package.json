@@ -50,5 +50,8 @@
     "check": "npm run typecheck && npm test && npm run smoke",
     "publish:npm": "./scripts/publish-npm.sh",
     "prepublishOnly": "npm run check"
+  },
+  "dependencies": {
+    "typebox": "^1.1.38"
   }
 }
