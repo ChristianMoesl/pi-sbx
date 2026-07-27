@@ -136,10 +136,14 @@ function createSbxEditOps(transport: SbxTransport, cwd: string): EditOperations 
 	};
 }
 
+export function createSandboxBashCommand(command: string): string[] {
+	return ["bash", "-lc", command];
+}
+
 function createSbxBashOps(transport: SbxTransport): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout }) => {
-			const result = await transport.execute(cwd, ["sh", "-lc", command], {
+			const result = await transport.execute(cwd, createSandboxBashCommand(command), {
 				onStdout: onData,
 				onStderr: onData,
 				signal,

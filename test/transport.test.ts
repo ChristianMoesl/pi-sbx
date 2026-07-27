@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
+import { createSandboxBashCommand } from "../extensions/pi-sbx/index.ts";
 import { SBX_WORKER_SCRIPT, SbxTransport, type SpawnWorker } from "../extensions/pi-sbx/transport.ts";
 
 const spawnLocalWorker: SpawnWorker = () =>
@@ -32,6 +33,19 @@ test("reuses one worker for concurrent commands and keeps output separated", asy
 		assert.equal(result.stdout.toString(), `stdout-${index}`);
 		assert.equal(result.stderr.toString(), `stderr-${index}`);
 	}
+});
+
+test("sandbox bash commands support Bash-specific quoting", async (t) => {
+	const transport = localTransport();
+	t.after(() => transport.dispose());
+
+	const result = await transport.execute(
+		process.cwd(),
+		createSandboxBashCommand("printf '%s' $'first\\nsecond'"),
+	);
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.stdout.toString(), "first\nsecond");
 });
 
 test("forwards binary stdin and streams output", async (t) => {
