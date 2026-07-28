@@ -39,19 +39,19 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.7",
-    "@types/node": "^26.1.1",
+    "@earendil-works/pi-coding-agent": "^0.82.1",
+    "@types/node": "^26.1.2",
     "typescript": "^7.0.2"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types --import ./test/setup.ts --test test/*.test.ts",
     "smoke": "pi --no-extensions -e . --offline --list-models __pi_sbx_smoke__",
     "check": "npm run typecheck && npm test && npm run smoke",
     "publish:npm": "./scripts/publish-npm.sh",
     "prepublishOnly": "npm run check"
   },
   "dependencies": {
-    "typebox": "^1.1.38"
+    "typebox": "^1.3.8"
   }
 }
