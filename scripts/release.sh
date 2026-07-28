@@ -9,7 +9,7 @@ usage() {
 Usage: npm run release -- <version>
 
 <version> must be an explicit semantic version, for example 1.2.3.
-This command expects npm to already be authenticated for publishing.
+This command expects npm to be authenticated for publishing and gh to be authenticated for GitHub releases.
 EOF
 }
 
@@ -41,8 +41,13 @@ if [[ -n "$(git status --porcelain)" ]]; then
 	exit 1
 fi
 
-# Fail before changing package files when npm login or the release tag is invalid.
+# Fail before changing package files when required authentication or the release tag is invalid.
 npm --registry "${registry}" whoami >/dev/null
+if ! command -v gh >/dev/null; then
+	echo "Error: gh is required to create the GitHub release." >&2
+	exit 1
+fi
+gh auth status >/dev/null
 
 git fetch origin main --tags
 head_commit=$(git rev-parse HEAD)
@@ -74,3 +79,4 @@ git tag -a "${release_tag}" -m "${release_tag}"
 git push origin "${release_tag}"
 
 npm run publish:npm
+gh release create "${release_tag}" --title "${release_tag}" --generate-notes

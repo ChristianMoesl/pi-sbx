@@ -136,7 +136,7 @@ Pi executes the TypeScript extension directly; no build step is required.
 
 The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Publishing is performed manually from a local checkout; creating a GitHub release does not publish anything automatically.
 
-Log in to npm first (for example, with `npm login`), then run:
+Log in to npm first (for example, with `npm login`) and authenticate the GitHub CLI with `gh auth login`, then run:
 
 ```sh
 npm run release -- <version>
@@ -148,15 +148,9 @@ For example:
 npm run release -- 0.4.1
 ```
 
-The release script requires a clean, current `main` checkout and an explicit semantic version. It verifies npm authentication and that the release tag does not already exist before changing files. It then updates `package.json` and `package-lock.json`, commits and pushes `main`, creates and pushes an annotated `v<version>` tag, and runs the publish script.
+The release script requires a clean, current `main` checkout and an explicit semantic version. It verifies npm and GitHub CLI authentication and that the release tag does not already exist before changing files. It then updates `package.json` and `package-lock.json`, commits and pushes `main`, creates and pushes an annotated `v<version>` tag, and runs the publish script.
 
-The publish script verifies that `origin/main` and the release tag point to `HEAD`, runs the checks and package dry run, verifies npm authentication again, and asks for final confirmation before publishing the public package.
-
-Optionally create a GitHub release after publishing:
-
-```sh
-gh release create v<version> --title "v<version>" --generate-notes
-```
+The publish script verifies that `origin/main` and the release tag point to `HEAD`, runs the checks and package dry run, verifies npm authentication again, and asks for final confirmation before publishing the public package. After a successful npm publish, the release script always creates the GitHub release with generated notes.
 
 Each npm version can only be published once. If publication fails, check whether that version exists on npm before retrying.
 
