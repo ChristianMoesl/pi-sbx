@@ -89,9 +89,11 @@ The routed built-in tools also accept an optional `execution_target` argument:
 }
 ```
 
-The default target is `sandbox`. While a sandbox is active, every `host` tool call shows its exact operation and requires user approval. Approval applies only to that unchanged tool call; it does not disable the sandbox or approve later calls. Host requests are blocked when no interactive approval UI is available. In host-fallback mode the tools already run on the host, so no approval is requested.
+The default target is `sandbox`. While a sandbox is active, every `host` call to a routed built-in tool shows its exact operation and requires user approval. Approval applies only to that unchanged tool call; it does not disable the sandbox or approve later calls. Host requests are blocked when no interactive approval UI is available. In host-fallback mode the tools already run on the host, so no approval is requested.
 
-If no matching sandbox exists—or `sbx` cannot be discovered—the extension falls back to Pi's normal host tools. In host-fallback mode, third-party tools are not blocked and interactive `!` commands also run normally on the host.
+Extension-provided tools are not routed through SBX and run on the host by default without pi-sbx approval. At the start of each agent turn, pi-sbx adds up to the first 10 active host tool names to the system prompt so the model can distinguish them from sandboxed tools.
+
+If no matching sandbox exists—or `sbx` cannot be discovered—the extension falls back to Pi's normal host tools. Interactive `!` commands also run normally on the host.
 
 ## Security model
 
@@ -100,8 +102,8 @@ If no matching sandbox exists—or `sbx` cannot be discovered—the extension fa
 - The `read` tool may read skills discovered by Pi from the host, regardless of whether they came from global, project, package, settings, or CLI locations. Directory-based skills include supporting files below their base directory; standalone Markdown skills include only the discovered file. Canonical-path checks reject traversal and symlink escapes from skill directories.
 - Host environment variables are not forwarded to sandboxed shell commands.
 - An approved `execution_target: "host"` call runs with Pi's normal host permissions and environment. Treat the confirmation as a sandbox escape authorization.
-- While an SBX sandbox is selected, unknown third-party tools are blocked because Pi cannot transparently move arbitrary extension implementations into SBX.
-- When no sandbox is available, Pi's normal host-tool behavior is preserved, including third-party tools.
+- Extension-provided tools execute in Pi's host process and are not intercepted or approved by pi-sbx. Only install trusted extensions and review their tool behavior.
+- When no sandbox is available, Pi's normal host-tool behavior is preserved.
 - Do not combine `pi-sbx` with another extension that overrides the same built-in tool names.
 
 Provide required secrets through SBX policy or secret mechanisms instead of exposing the host Pi agent directory.

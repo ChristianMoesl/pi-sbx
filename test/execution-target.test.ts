@@ -26,7 +26,7 @@ interface Harness {
 	emit(eventName: string, event: any): Promise<any[]>;
 }
 
-function createHarness(options: { sandbox?: boolean; hasUI?: boolean } = {}): Harness {
+function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTools?: string[] } = {}): Harness {
 	const tools = new Map<string, RegisteredTool>();
 	const handlers = new Map<string, Handler[]>();
 	const confirmations: Array<{ title: string; message: string }> = [];
@@ -63,6 +63,7 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean } = {}): Ha
 			handlers.set(eventName, registered);
 		},
 		appendEntry() {},
+		getActiveTools: () => options.activeTools ?? [...ROUTED_TOOLS],
 		exec: async () => ({
 			code: 0,
 			stdout: JSON.stringify({
@@ -184,7 +185,7 @@ test("routes every approved built-in tool to the host", async (t) => {
 	assert.equal(harness.confirmations.length, calls.length);
 });
 
-test("does not prompt for normal sandbox calls and still blocks unknown tools", async () => {
+test("does not prompt for normal sandbox calls and allows extension tools on the host", async () => {
 	const harness = createHarness();
 	await startHarness(harness);
 
@@ -193,15 +194,12 @@ test("does not prompt for normal sandbox calls and still blocks unknown tools", 
 		"tool_call",
 		toolCall("read", "sandbox-explicit", { path: "README.md", execution_target: "sandbox" }),
 	);
-	const [unknownResult] = await harness.emit("tool_call", toolCall("third_party", "unknown", {}));
+	const [extensionResult] = await harness.emit("tool_call", toolCall("third_party", "extension", {}));
 
 	assert.equal(defaultResult, undefined);
 	assert.equal(explicitResult, undefined);
+	assert.equal(extensionResult, undefined);
 	assert.equal(harness.confirmations.length, 0);
-	assert.deepEqual(unknownResult, {
-		block: true,
-		reason: "Tool third_party is not sandbox-aware and cannot run in the selected sbx sandbox.",
-	});
 });
 
 test("blocks host execution when the user denies approval", async () => {
@@ -310,11 +308,18 @@ test("reads Pi-discovered skills from the host while sandboxing is active", asyn
 });
 
 test("adds opinionated host-execution guidance only when a sandbox is active", async () => {
-	const sandboxed = createHarness();
+	const extensionTools = Array.from({ length: 12 }, (_, index) => `host-tool-${String(index + 1).padStart(2, "0")}`);
+	const sandboxed = createHarness({ activeTools: [...ROUTED_TOOLS, ...extensionTools] });
 	await startHarness(sandboxed);
 	const [sandboxPrompt] = await sandboxed.emit("before_agent_start", { systemPrompt: "base" });
 	assert.match(sandboxPrompt.systemPrompt, /Use "host" only when absolutely necessary/);
 	assert.match(sandboxPrompt.systemPrompt, /requires explicit user approval and interrupts the user/);
+	assert.match(
+		sandboxPrompt.systemPrompt,
+		/Active extension tools that run on the host by default \(up to 10\): host-tool-01, host-tool-02, host-tool-03, host-tool-04, host-tool-05, host-tool-06, host-tool-07, host-tool-08, host-tool-09, host-tool-10\./,
+	);
+	assert.doesNotMatch(sandboxPrompt.systemPrompt, /host-tool-11|host-tool-12/);
+	assert.doesNotMatch(sandboxPrompt.systemPrompt, /host by default.*\b(?:bash|read|write)\b/);
 
 	const fallback = createHarness({ sandbox: false });
 	await startHarness(fallback);

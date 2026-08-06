@@ -31,6 +31,7 @@ const STATE_ENTRY = "pi-sbx-selection";
 const ROUTED_TOOLS = new Set(["bash", "edit", "find", "grep", "ls", "read", "write"]);
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
 const DEFAULT_GREP_LIMIT = 100;
+const MAX_HOST_TOOL_NAMES = 10;
 const EXECUTION_TARGET_DESCRIPTION =
 	'Where to execute this tool call. Omit this or use "sandbox" normally. Use "host" only when sandbox execution cannot perform the operation; host execution requires user approval while sandboxing is active.';
 
@@ -552,13 +553,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (!selectedSandbox()) return;
-		if (!ROUTED_TOOLS.has(event.toolName)) {
-			return {
-				block: true,
-				reason: `Tool ${event.toolName} is not sandbox-aware and cannot run in the selected sbx sandbox.`,
-			};
-		}
+		if (!selectedSandbox() || !ROUTED_TOOLS.has(event.toolName)) return;
 		const input = event.input as Record<string, unknown>;
 		if (input.execution_target !== "host") return;
 		if (!ctx.hasUI) {
@@ -587,10 +582,17 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 			baseDir,
 		}));
 		const sandbox = selectedSandbox();
+		const hostTools = pi
+			.getActiveTools()
+			.filter((name) => !ROUTED_TOOLS.has(name))
+			.slice(0, MAX_HOST_TOOL_NAMES);
 		const environment = sandbox
 			? [
-					`Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; tool processes and filesystem operations run in the sandbox.`,
-					'Routed built-in tools accept execution_target: "sandbox" | "host". Omit execution_target or use "sandbox" normally. Use "host" only when absolutely necessary and sandbox execution cannot perform the operation. Every host-targeted tool call requires explicit user approval and interrupts the user, so avoid unnecessary or repeated host requests.',
+					`Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; routed tool processes and filesystem operations run in the sandbox.`,
+					'Routed built-in tools accept execution_target: "sandbox" | "host". Omit execution_target or use "sandbox" normally. Use "host" only when absolutely necessary and sandbox execution cannot perform the operation. Every host-targeted routed tool call requires explicit user approval and interrupts the user, so avoid unnecessary or repeated host requests.',
+					hostTools.length > 0
+						? `Active extension tools that run on the host by default (up to ${MAX_HOST_TOOL_NAMES}): ${hostTools.join(", ")}.`
+						: "No active extension tools run on the host by default.",
 				].join("\n")
 			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do. execution_target does not require approval in this mode.";
 		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
