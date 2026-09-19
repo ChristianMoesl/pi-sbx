@@ -11,7 +11,7 @@ const spawnLocalWorker: SpawnWorker = () =>
 	});
 
 function localTransport(): SbxTransport {
-	return new SbxTransport("test", process.cwd(), spawnLocalWorker);
+	return new SbxTransport("test", process.cwd(), { spawnWorker: spawnLocalWorker });
 }
 
 test("reuses one worker for concurrent commands and keeps output separated", async (t) => {
@@ -107,4 +107,29 @@ test("cancels timed-out commands without killing the worker", async (t) => {
 
 	const result = await transport.execute(process.cwd(), ["printf", "still-alive"]);
 	assert.equal(result.stdout.toString(), "still-alive");
+});
+
+test("uses the selected executable and maps worker and request cwd without rewriting command text", async (t) => {
+	const { WorkspacePaths } = await import("../extensions/pi-sbx/paths.ts");
+	const hostCwd = "/host/workspace";
+	const executable = "/path with spaces/sbx.exe";
+	let starts = 0;
+	const transport = new SbxTransport("test", hostCwd, {
+		executable,
+		paths: new WorkspacePaths([{ hostPath: hostCwd, sandboxPath: process.cwd() }]),
+		spawnWorker: (sandbox, cwd, command) => {
+			starts++;
+			assert.equal(sandbox, "test");
+			assert.equal(cwd, process.cwd());
+			assert.equal(command, executable);
+			return spawnLocalWorker(sandbox, cwd, command);
+		},
+	});
+	t.after(() => transport.dispose());
+	const result = await transport.execute(hostCwd, [
+		process.execPath, "-e", "console.log(process.cwd()); console.log(process.argv[1])", hostCwd,
+	]);
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.stdout.toString(), `${process.cwd()}\n${hostCwd}\n`);
+	assert.equal(starts, 1);
 });

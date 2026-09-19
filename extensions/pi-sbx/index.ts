@@ -22,7 +22,9 @@ import {
 	truncateLine,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
-import { parseMatchingSandboxes, type SbxSandbox } from "./discovery.ts";
+import { resolveSbxExecutable } from "./cli.ts";
+import { discoverSandboxes, type SbxSandbox } from "./discovery.ts";
+import { WorkspacePaths } from "./paths.ts";
 import { type DiscoveredSkillPath, resolveHostSkillReadPath } from "./skill-access.ts";
 import { SbxTransport, type SbxExecOptions, type SbxExecResult } from "./transport.ts";
 
@@ -99,12 +101,12 @@ async function successfulExec(
 function createSbxReadOps(transport: SbxTransport, cwd: string): ReadOperations {
 	return {
 		readFile: async (filePath) =>
-			(await successfulExec(transport, cwd, ["sh", "-c", 'cat -- "$1"', "sbx-read", filePath])).stdout,
+			(await successfulExec(transport, cwd, ["sh", "-c", 'cat -- "$1"', "sbx-read", transport.toSandboxPath(filePath)])).stdout,
 		access: async (filePath) => {
-			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1"', "sbx-read", filePath]);
+			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1"', "sbx-read", transport.toSandboxPath(filePath)]);
 		},
 		detectImageMimeType: async (filePath) => {
-			const result = await transport.execute(cwd, ["file", "--mime-type", "-b", filePath]);
+			const result = await transport.execute(cwd, ["file", "--mime-type", "-b", transport.toSandboxPath(filePath)]);
 			if (result.exitCode !== 0) return null;
 			const mimeType = result.stdout.toString().trim();
 			return ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"].includes(mimeType)
@@ -117,10 +119,10 @@ function createSbxReadOps(transport: SbxTransport, cwd: string): ReadOperations 
 function createSbxWriteOps(transport: SbxTransport, cwd: string): WriteOperations {
 	return {
 		mkdir: async (dirPath) => {
-			await successfulExec(transport, cwd, ["mkdir", "-p", "--", dirPath]);
+			await successfulExec(transport, cwd, ["mkdir", "-p", "--", transport.toSandboxPath(dirPath)]);
 		},
 		writeFile: async (filePath, content) => {
-			await successfulExec(transport, cwd, ["sh", "-c", 'cat > "$1"', "sbx-write", filePath], { input: content });
+			await successfulExec(transport, cwd, ["sh", "-c", 'cat > "$1"', "sbx-write", transport.toSandboxPath(filePath)], { input: content });
 		},
 	};
 }
@@ -132,7 +134,7 @@ function createSbxEditOps(transport: SbxTransport, cwd: string): EditOperations 
 		readFile: read.readFile,
 		writeFile: write.writeFile,
 		access: async (filePath) => {
-			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1" && test -w "$1"', "sbx-edit", filePath]);
+			await successfulExec(transport, cwd, ["sh", "-c", 'test -r "$1" && test -w "$1"', "sbx-edit", transport.toSandboxPath(filePath)]);
 		},
 	};
 }
@@ -159,13 +161,13 @@ function createSbxLsOps(transport: SbxTransport, cwd: string): LsOperations {
 	const directoryCache = new Map<string, boolean>();
 	return {
 		exists: async (filePath) => {
-			const result = await transport.execute(cwd, ["sh", "-c", 'test -e "$1"', "sbx-ls", filePath]);
+			const result = await transport.execute(cwd, ["sh", "-c", 'test -e "$1"', "sbx-ls", transport.toSandboxPath(filePath)]);
 			return result.exitCode === 0;
 		},
 		stat: async (filePath) => {
 			let isDirectory = directoryCache.get(filePath);
 			if (isDirectory === undefined) {
-				const result = await transport.execute(cwd, ["sh", "-c", 'test -d "$1"', "sbx-ls", filePath]);
+				const result = await transport.execute(cwd, ["sh", "-c", 'test -d "$1"', "sbx-ls", transport.toSandboxPath(filePath)]);
 				isDirectory = result.exitCode === 0;
 				directoryCache.set(filePath, isDirectory);
 			}
@@ -182,7 +184,7 @@ function createSbxLsOps(transport: SbxTransport, cwd: string): LsOperations {
 				'  fi',
 				'done',
 			].join("\n");
-			const result = await successfulExec(transport, cwd, ["sh", "-c", script, "sbx-ls", dirPath]);
+			const result = await successfulExec(transport, cwd, ["sh", "-c", script, "sbx-ls", transport.toSandboxPath(dirPath)]);
 			const fields = result.stdout.toString().split("\0");
 			fields.pop();
 			const entries: Array<{ name: string; directory: boolean }> = [];
@@ -208,10 +210,11 @@ function matchesToolGlob(relativePath: string, pattern: string): boolean {
 function createSbxFindOps(transport: SbxTransport, sessionCwd: string): FindOperations {
 	return {
 		exists: async (filePath) => {
-			const result = await transport.execute(sessionCwd, ["sh", "-c", 'test -e "$1"', "sbx-find", filePath]);
+			const result = await transport.execute(sessionCwd, ["sh", "-c", 'test -e "$1"', "sbx-find", transport.toSandboxPath(filePath)]);
 			return result.exitCode === 0;
 		},
 		glob: async (pattern, cwd, options) => {
+			const sandboxCwd = transport.toSandboxPath(cwd);
 			const result = await transport.execute(cwd, [
 				"rg",
 				"--files",
@@ -222,14 +225,14 @@ function createSbxFindOps(transport: SbxTransport, sessionCwd: string): FindOper
 				"!**/.git/**",
 				"--glob",
 				"!**/node_modules/**",
-				cwd,
+				sandboxCwd,
 			]);
 			if (result.exitCode !== 0 && result.exitCode !== 1) throw commandError(["rg"], result);
 			const matches: string[] = [];
 			for (const filePath of result.stdout.toString().split("\n")) {
 				if (!filePath) continue;
-				const relativePath = path.relative(cwd, filePath).replaceAll("\\", "/");
-				if (matchesToolGlob(relativePath, pattern)) matches.push(filePath);
+				const relativePath = path.posix.relative(sandboxCwd, filePath);
+				if (matchesToolGlob(relativePath, pattern)) matches.push(path.join(cwd, relativePath));
 				if (matches.length >= options.limit) break;
 			}
 			return matches;
@@ -238,8 +241,8 @@ function createSbxFindOps(transport: SbxTransport, sessionCwd: string): FindOper
 }
 
 function formatGrepPath(searchPath: string, filePath: string, isDirectory: boolean): string {
-	if (!isDirectory) return path.basename(filePath);
-	const relativePath = path.relative(searchPath, filePath).replaceAll("\\", "/");
+	if (!isDirectory) return path.posix.basename(filePath);
+	const relativePath = path.posix.relative(searchPath, filePath);
 	return relativePath && !relativePath.startsWith("..") ? relativePath : filePath;
 }
 
@@ -249,7 +252,7 @@ async function executeSbxGrep(
 	params: GrepToolInput,
 	signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: GrepToolDetails | undefined }> {
-	const searchPath = path.resolve(cwd, params.path ?? ".");
+	const searchPath = transport.toSandboxPath(path.resolve(cwd, params.path ?? "."));
 	const directoryResult = await transport.execute(cwd, ["sh", "-c", 'test -d "$1"', "sbx-grep", searchPath], {
 		signal,
 	});
@@ -332,6 +335,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	const localFind = createFindTool(cwd);
 	const localGrep = createGrepTool(cwd);
 	let sandboxes: SbxSandbox[] = [];
+	let sbxExecutable = "sbx";
 	let selectedName: string | undefined;
 	let sandboxingEnabled = true;
 	let transport: SbxTransport | undefined;
@@ -353,7 +357,10 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 		}
 		if (!transport || transportSandbox !== sandbox) {
 			disposeTransport();
-			transport = new SbxTransport(sandbox, cwd);
+			transport = new SbxTransport(sandbox, cwd, {
+				executable: sbxExecutable,
+				paths: new WorkspacePaths(sandboxes.find((entry) => entry.name === sandbox)?.mounts),
+			});
 			transportSandbox = sandbox;
 		}
 		return transport;
@@ -379,11 +386,12 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	}
 
 	async function discover(ctx: ExtensionContext): Promise<SbxSandbox[]> {
-		const result = await pi.exec("sbx", ["ls", "--json"], { timeout: 10_000 });
-		if (result.code !== 0) {
-			throw new Error(result.stderr.trim() || `sbx ls --json exited with code ${result.code}`);
-		}
-		sandboxes = parseMatchingSandboxes(result.stdout, cwd);
+		const executable = resolveSbxExecutable();
+		const discovered = await discoverSandboxes(pi.exec.bind(pi), executable, cwd);
+		// Refresh executable and mount mappings together; don't reuse a worker with stale paths.
+		disposeTransport();
+		sbxExecutable = executable;
+		sandboxes = discovered;
 		if (selectedName && !sandboxes.some((sandbox) => sandbox.name === selectedName)) {
 			selectedName = undefined;
 			disposeTransport();
@@ -582,6 +590,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 			baseDir,
 		}));
 		const sandbox = selectedSandbox();
+		const sandboxCwd = new WorkspacePaths(sandboxes.find((entry) => entry.name === sandbox)?.mounts).toSandbox(cwd);
 		const hostTools = pi
 			.getActiveTools()
 			.filter((name) => !ROUTED_TOOLS.has(name))
@@ -589,13 +598,15 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 		const environment = sandbox
 			? [
 					`Tool execution environment: sbx sandbox ${sandbox}. Pi itself runs on the host; routed tool processes and filesystem operations run in the sandbox.`,
+					`Sandbox working directory: ${sandboxCwd}. Shell commands use Linux paths inside the sandbox; command text is not path-translated. Filesystem tools accept relative paths, host workspace paths, or sandbox paths. Host working directory: ${cwd}.`,
 					'Routed built-in tools accept execution_target: "sandbox" | "host". Omit execution_target or use "sandbox" normally. Use "host" only when absolutely necessary and sandbox execution cannot perform the operation. Every host-targeted routed tool call requires explicit user approval and interrupts the user, so avoid unnecessary or repeated host requests.',
 					hostTools.length > 0
 						? `Active extension tools that run on the host by default (up to ${MAX_HOST_TOOL_NAMES}): ${hostTools.join(", ")}.`
 						: "No active extension tools run on the host by default.",
 				].join("\n")
 			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do. execution_target does not require approval in this mode.";
-		return { systemPrompt: `${event.systemPrompt}\n\n${environment}` };
+		const systemPrompt = sandbox ? event.systemPrompt.replace(`Current working directory: ${cwd}`, `Current working directory: ${sandboxCwd}`) : event.systemPrompt;
+		return { systemPrompt: `${systemPrompt}\n\n${environment}` };
 	});
 
 	pi.on("session_shutdown", () => {

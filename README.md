@@ -10,12 +10,12 @@ Running Pi itself in a sandbox means mounting its configuration, provider creden
 
 - Pi with Node.js 24 or newer
 - To use sandboxing: Docker `sbx` available on the host
-- To use sandboxing: an SBX sandbox that mounts Pi's current working directory at the same absolute path
+- To use sandboxing: an SBX sandbox that directly mounts Pi's current working directory (or a parent directory)
 - To use sandboxing: Node.js, Bash, `sh`, `rg`, and `file` in the sandbox image
 
 Without SBX, the extension remains usable and leaves Pi's standard host tools unchanged.
 
-The extension is currently designed and tested for macOS hosts and Linux SBX sandboxes.
+The extension supports macOS hosts and Pi running inside WSL2 with Windows Docker Sandboxes. Sandboxes must run Linux. WSL2 integration has been tested with `sbx.exe` v0.43.0, using both WSL-filesystem and Windows-drive workspaces. Running Pi directly in native Windows Node.js is not yet supported; run Pi inside WSL instead.
 
 ## Install
 
@@ -57,7 +57,40 @@ Start Pi on the host from that workspace:
 pi
 ```
 
-`pi-sbx` discovers sandboxes using `sbx ls --json`. It keeps sandboxes whose workspace mounts contain Pi's current working directory, preferring a running sandbox and then sorting by name. A stopped sandbox is valid because `sbx exec` starts it automatically.
+`pi-sbx` discovers sandboxes using `sbx ls --json`. It keeps sandboxes whose workspace mounts contain Pi's current working directory, preferring a running sandbox and then sorting by name. A stopped sandbox is valid because `sbx exec` starts it automatically. Use direct workspace mounts, not SBX's `--clone` mode.
+
+### Windows / WSL2
+
+Install [Docker Sandboxes for Windows](https://docs.docker.com/ai/sandboxes/install/) and install Pi and Node.js inside WSL. WSL interoperability must be enabled, and `sbx.exe` must be on WSL's `PATH`. Check this from your WSL terminal:
+
+```sh
+sbx.exe version
+sbx.exe ls --json
+```
+
+Create a sandbox from your WSL project directory, converting the **host workspace argument** to a Windows path:
+
+```sh
+sbx.exe create \
+  --name my-workspace \
+  --template christianmoesl/radar-sandbox:latest \
+  shell "$(wslpath -w "$PWD")"
+pi
+```
+
+This works for projects in the WSL filesystem (for example `/home/you/project`) and Windows drives (for example `/mnt/c/Users/you/project`). Use the same workspace path spelling when creating the sandbox and starting Pi.
+
+In WSL, pi-sbx prefers a native `sbx` on `PATH`, falling back to `sbx.exe` when no native executable is found. The selected executable is used for both discovery and execution; CLI errors do not cause it to switch installations. To select a particular executable explicitly:
+
+```sh
+PI_SBX_EXECUTABLE="$(command -v sbx.exe)" pi
+```
+
+`PI_SBX_EXECUTABLE` is an executable path or command name, not a shell command with arguments. Shell aliases are not used.
+
+Windows SBX mounts have different paths inside the sandbox: `C:\Users\you\project` becomes `/c/Users/you/project`, and `\\wsl.localhost\Ubuntu\home\you\project` becomes `/wsl.localhost/Ubuntu/home/you/project`. pi-sbx uses `wslpath` for discovery and translates filesystem-tool paths and working directories. The agent is told the sandbox working directory. Bash and `!` command text is **not** rewritten: use relative paths or Linux sandbox paths in shell commands.
+
+If the footer says **`sbx: host fallback`**, tools are running on the host, not in a sandbox. Check `sbx.exe ls --json` and run `/sbx` to refresh discovery.
 
 ## Usage
 
@@ -133,6 +166,15 @@ npm pack --dry-run
 ```
 
 Pi executes the TypeScript extension directly; no build step is required.
+
+An optional end-to-end test exercises all routed tools and `!` commands against an existing sandbox. Set `PI_SBX_TEST_WORKSPACE` to a directly mounted host directory (in WSL, use its Linux path):
+
+```sh
+PI_SBX_TEST_WORKSPACE=/path/to/workspace \
+  node --experimental-strip-types --import ./test/setup.ts --test test/sbx-integration.test.ts
+```
+
+The test creates and removes a unique temporary subdirectory in that workspace. It does not create or remove sandboxes. Without this variable, the integration test is skipped.
 
 ## Releasing
 

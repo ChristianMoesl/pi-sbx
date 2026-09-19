@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { WorkspacePaths } from "./paths.ts";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
@@ -50,13 +52,23 @@ interface PendingExecution {
 	cleanup: () => void;
 }
 
-export type SpawnWorker = (sandbox: string, cwd: string) => ChildProcessWithoutNullStreams;
+export type SpawnWorker = (sandbox: string, cwd: string, executable: string) => ChildProcessWithoutNullStreams;
+
+export interface SbxTransportOptions {
+	executable?: string;
+	paths?: WorkspacePaths;
+	spawnWorker?: SpawnWorker;
+}
 
 export const SBX_WORKER_SCRIPT = readFileSync(new URL("./worker.cjs", import.meta.url), "utf8");
 
-function spawnSbxWorker(sandbox: string, cwd: string): ChildProcessWithoutNullStreams {
-	return spawn("sbx", ["exec", "-i", "--workdir", cwd, sandbox, "node", "-e", SBX_WORKER_SCRIPT], {
-		detached: true,
+function spawnSbxWorker(sandbox: string, cwd: string, executable: string): ChildProcessWithoutNullStreams {
+	return spawn(executable, ["exec", "-i", "--workdir", cwd, sandbox, "node", "-e", SBX_WORKER_SCRIPT], {
+		// A Windows process holds its host cwd open. Don't lock the project directory
+		// for the lifetime of sbx.exe; --workdir sets the independent sandbox cwd.
+		cwd: tmpdir(),
+		detached: process.platform !== "win32",
+		windowsHide: true,
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 }
@@ -64,7 +76,8 @@ function spawnSbxWorker(sandbox: string, cwd: string): ChildProcessWithoutNullSt
 function killProcess(child: ChildProcessWithoutNullStreams): void {
 	if (!child.pid) return;
 	try {
-		process.kill(-child.pid, "SIGKILL");
+		if (process.platform === "win32") child.kill("SIGKILL");
+		else process.kill(-child.pid, "SIGKILL");
 	} catch {
 		child.kill("SIGKILL");
 	}
@@ -78,6 +91,8 @@ export class SbxTransport {
 	private readonly sandbox: string;
 	private readonly workerCwd: string;
 	private readonly spawnWorker: SpawnWorker;
+	private readonly executable: string;
+	private readonly paths: WorkspacePaths;
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private startPromise: Promise<void> | undefined;
 	private resolveStart: (() => void) | undefined;
@@ -89,10 +104,16 @@ export class SbxTransport {
 	private readonly pending = new Map<string, PendingExecution>();
 	private disposed = false;
 
-	constructor(sandbox: string, workerCwd: string, spawnWorker: SpawnWorker = spawnSbxWorker) {
+	constructor(sandbox: string, workerCwd: string, options: SbxTransportOptions = {}) {
 		this.sandbox = sandbox;
-		this.workerCwd = workerCwd;
-		this.spawnWorker = spawnWorker;
+		this.paths = options.paths ?? new WorkspacePaths();
+		this.workerCwd = this.toSandboxPath(workerCwd);
+		this.executable = options.executable ?? "sbx";
+		this.spawnWorker = options.spawnWorker ?? spawnSbxWorker;
+	}
+
+	toSandboxPath(value: string): string {
+		return this.paths.toSandbox(value);
 	}
 
 	async execute(cwd: string, command: string[], options: SbxExecOptions = {}): Promise<SbxExecResult> {
@@ -149,7 +170,7 @@ export class SbxTransport {
 				this.send({
 					type: "exec",
 					id,
-					cwd,
+					cwd: this.toSandboxPath(cwd),
 					command,
 					input: options.input === undefined ? undefined : Buffer.from(options.input).toString("base64"),
 				});
@@ -186,7 +207,7 @@ export class SbxTransport {
 		this.stderrPending = "";
 
 		try {
-			const child = this.spawnWorker(this.sandbox, this.workerCwd);
+			const child = this.spawnWorker(this.sandbox, this.workerCwd, this.executable);
 			this.child = child;
 			this.startupTimer = setTimeout(() => {
 				this.handleExit(child, new Error(`Timed out starting sbx transport for ${this.sandbox}`));
