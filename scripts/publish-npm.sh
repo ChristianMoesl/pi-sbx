@@ -11,7 +11,7 @@ case "${1:-}" in
   "") ;;
   --dry-run) dry_run=true ;;
   *)
-    echo "Usage: npm run publish:npm -- [--dry-run]" >&2
+    echo "Usage: pnpm run publish:npm [--dry-run]" >&2
     exit 2
     ;;
 esac
@@ -57,15 +57,15 @@ if [[ "${remote_tag}" != "${head_commit}" ]]; then
 fi
 
 echo "Checking ${package_name}@${package_version}..."
-npm run check
-npm pack --dry-run
+pnpm run check
+pnpm pack --dry-run
 
 if [[ "${dry_run}" == true ]]; then
   echo "Dry run complete; nothing was published."
   exit 0
 fi
 
-npm_args=(--registry "${registry}")
+pnpm_args=(--registry "${registry}")
 temporary_npmrc=""
 cleanup() {
   if [[ -n "${temporary_npmrc}" ]]; then
@@ -78,12 +78,12 @@ if [[ -n "${NPM_TOKEN:-}" ]]; then
   temporary_npmrc=$(mktemp)
   chmod 600 "${temporary_npmrc}"
   printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" >"${temporary_npmrc}"
-  npm_args=(--userconfig "${temporary_npmrc}" "${npm_args[@]}")
+  pnpm_args=(--userconfig "${temporary_npmrc}" "${pnpm_args[@]}")
 fi
 
-npm "${npm_args[@]}" whoami >/dev/null
+pnpm "${pnpm_args[@]}" whoami >/dev/null
 
-if published_version=$(npm "${npm_args[@]}" view "${package_name}@${package_version}" version 2>/dev/null); then
+if published_version=$(pnpm "${pnpm_args[@]}" view "${package_name}@${package_version}" version 2>/dev/null); then
   echo "Error: ${package_name}@${published_version} is already published." >&2
   exit 1
 fi
@@ -95,5 +95,5 @@ if [[ "${confirmation}" != "y" && "${confirmation}" != "Y" ]]; then
   exit 1
 fi
 
-npm "${npm_args[@]}" publish --access public
+pnpm "${pnpm_args[@]}" publish --access public
 echo "Published ${package_name}@${package_version}."

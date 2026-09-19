@@ -6,10 +6,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 usage() {
 	cat >&2 <<'EOF'
-Usage: npm run release -- <version>
+Usage: pnpm run release <version>
 
 <version> must be an explicit semantic version, for example 1.2.3.
-This command expects npm to be authenticated for publishing and gh to be authenticated for GitHub releases.
+This command expects pnpm to be authenticated with the npm registry and gh to be authenticated for GitHub releases.
 EOF
 }
 
@@ -42,7 +42,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 # Fail before changing package files when required authentication or the release tag is invalid.
-npm --registry "${registry}" whoami >/dev/null
+pnpm --registry "${registry}" whoami >/dev/null
 if ! command -v gh >/dev/null; then
 	echo "Error: gh is required to create the GitHub release." >&2
 	exit 1
@@ -63,20 +63,20 @@ if git rev-parse --verify --quiet "refs/tags/${release_tag}" >/dev/null || \
 	exit 1
 fi
 
-npm version "${requested_version}" --no-git-tag-version
+pnpm version "${requested_version}" --no-git-tag-version
 package_version=$(node -p "require('./package.json').version")
 if [[ "${package_version}" != "${requested_version}" ]]; then
-	git restore -- package.json package-lock.json
-	echo "Error: npm normalized the version to ${package_version}; aborting before commit." >&2
+	git restore -- package.json pnpm-lock.yaml
+	echo "Error: pnpm normalized the version to ${package_version}; aborting before commit." >&2
 	exit 1
 fi
 
-git add package.json package-lock.json
+git add package.json pnpm-lock.yaml
 git commit -m "chore: release ${release_tag}"
 git push origin main
 
 git tag -a "${release_tag}" -m "${release_tag}"
 git push origin "${release_tag}"
 
-npm run publish:npm
+pnpm run publish:npm
 gh release create "${release_tag}" --title "${release_tag}" --generate-notes

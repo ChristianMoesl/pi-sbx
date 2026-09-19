@@ -159,11 +159,15 @@ For a Git installation, use `pi remove git:github.com/ChristianMoesl/pi-sbx` ins
 
 ## Development
 
+Use Node.js 24+ and the pnpm version pinned in `package.json` (currently **12.4.2**). With Corepack installed, run `corepack enable` once to enable its package-manager shims.
+
 ```sh
-npm install
-npm run check
-npm pack --dry-run
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm pack --dry-run
 ```
+
+Commit dependency changes to `pnpm-lock.yaml`; do not generate an npm lockfile. `pnpm-workspace.yaml` records reviewed dependency-script decisions, leaving unreviewed install scripts blocked.
 
 Pi executes the TypeScript extension directly; no build step is required.
 
@@ -180,23 +184,23 @@ The test creates and removes a unique temporary subdirectory in that workspace. 
 
 The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Publishing is performed manually from a local checkout; creating a GitHub release does not publish anything automatically.
 
-Log in to npm first (for example, with `npm login`) and authenticate the GitHub CLI with `gh auth login`, then run:
+Log in to the npm registry with `pnpm login` and authenticate the GitHub CLI with `gh auth login`, then run:
 
 ```sh
-npm run release -- <version>
+pnpm run release <version>
 ```
 
 For example:
 
 ```sh
-npm run release -- 0.4.1
+pnpm run release 0.5.1
 ```
 
-The release script requires a clean, current `main` checkout and an explicit semantic version. It verifies npm and GitHub CLI authentication and that the release tag does not already exist before changing files. It then updates `package.json` and `package-lock.json`, commits and pushes `main`, creates and pushes an annotated `v<version>` tag, and runs the publish script.
+The release script requires a clean, current `main` checkout and an explicit semantic version. It verifies registry and GitHub CLI authentication and that the release tag does not already exist before changing files. It then bumps the version with `pnpm version`, commits `package.json` and any `pnpm-lock.yaml` changes, pushes `main`, creates and pushes an annotated `v<version>` tag, and runs the publish script.
 
-The publish script verifies that `origin/main` and the release tag point to `HEAD`, runs the checks and package dry run, verifies npm authentication again, and asks for final confirmation before publishing the public package. After a successful npm publish, the release script always creates the GitHub release with generated notes.
+The publish script verifies that `origin/main` and the release tag point to `HEAD`, runs the checks and package dry run, verifies registry authentication again, and asks for final confirmation before publishing the public package with pnpm. Publishing may require browser or 2FA approval even after login. After successful publication, the release script creates the GitHub release with generated notes.
 
-Each npm version can only be published once. If publication fails, check whether that version exists on npm before retrying.
+Each npm version can only be published once. If publication fails, check whether that version exists on npm before retrying. If the tag is already pushed but the version is not published, resume with `pnpm run publish:npm` in an interactive terminal rather than rerunning the release script. After that succeeds, finish with `gh release create v<version> --title v<version> --generate-notes`.
 
 ## License
 

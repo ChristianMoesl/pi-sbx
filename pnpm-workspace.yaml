@@ -1,0 +1,5 @@
+# These published dependencies are ready to use; neither hook builds runtime files.
+# Keep unreviewed dependency scripts blocked (pnpm's default).
+allowBuilds:
+  '@google/genai@1.52.0': false # preinstall is a no-op
+  protobufjs@7.6.5: false # postinstall only checks dependency version schemes
