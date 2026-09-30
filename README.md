@@ -128,6 +128,12 @@ Extension-provided tools are not routed through SBX and run on the host by defau
 
 If no matching sandbox exists—or `sbx` cannot be discovered—the extension falls back to Pi's normal host tools. Interactive `!` commands also run normally on the host.
 
+## Startup warnings
+
+- **Host-provided packages in `dependencies` (`typebox`):** update `pi-sbx` to a version that declares these as `"*"` peer dependencies, then reload Pi.
+- **No sbx sandbox is active:** tools will run on the host. This is intentional when no matching sandbox is available; create a sandbox for the workspace and run `/sbx` to select it.
+- **`pi-mcp-adapter` replaces built-in `mcp`:** this is a Pi configuration conflict, not a `pi-sbx` error. Use `pi config` to keep only one MCP implementation enabled. If switching to built-in MCP, migrate and verify your server configuration before removing the adapter.
+
 ## Security model
 
 - Pi and model-provider communication remain on the host.
@@ -169,7 +175,7 @@ pnpm pack --dry-run
 
 Commit dependency changes to `pnpm-lock.yaml`; do not generate an npm lockfile. `pnpm-workspace.yaml` records reviewed dependency-script decisions, leaving unreviewed install scripts blocked.
 
-Pi executes the TypeScript extension directly; no build step is required.
+Pi executes the TypeScript extension directly; no build step is required. Pi supplies `@earendil-works/pi-coding-agent` and `typebox` at runtime, so both are declared as `"*"` peer dependencies. Their development dependencies are only for local typechecking and tests; do not move them into `dependencies` or bundle them.
 
 An optional end-to-end test exercises all routed tools and `!` commands against an existing sandbox. Set `PI_SBX_TEST_WORKSPACE` to a directly mounted host directory (in WSL, use its Linux path):
 

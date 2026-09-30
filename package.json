@@ -37,11 +37,13 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.82.1",
     "@types/node": "^26.1.2",
+    "typebox": "^1.3.8",
     "typescript": "^7.0.2"
   },
   "scripts": {
@@ -52,8 +54,5 @@
     "publish:npm": "./scripts/publish-npm.sh",
     "release": "./scripts/release.sh",
     "prepublishOnly": "pnpm run check"
-  },
-  "dependencies": {
-    "typebox": "^1.3.8"
   }
 }
