@@ -11,3 +11,12 @@ for (const name of ["@earendil-works/pi-coding-agent", "typebox"]) {
 		assert.equal(typeof manifest.devDependencies?.[name], "string", `${name} is needed for local checks`);
 	});
 }
+
+
+test("published package includes the image readiness contract", async () => {
+	assert.ok(manifest.files.includes("docs"));
+	const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+	assert.match(readme, /\(docs\/readiness\.md\)/);
+	const contract = await readFile(new URL("../docs/readiness.md", import.meta.url), "utf8");
+	assert.match(contract, /sandbox-startup wait --timeout 60/);
+});

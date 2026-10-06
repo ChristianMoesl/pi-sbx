@@ -23,7 +23,8 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { resolveSbxExecutable } from "./cli.ts";
-import { discoverSandboxes, type SbxSandbox } from "./discovery.ts";
+import { discoverSandboxes } from "./discovery.ts";
+import { SandboxConnection, type ConnectionOptions, type SandboxList } from "./connection.ts";
 import { WorkspacePaths } from "./paths.ts";
 import { type DiscoveredSkillPath, resolveHostSkillReadPath } from "./skill-access.ts";
 import { SbxTransport, type SbxExecOptions, type SbxExecResult } from "./transport.ts";
@@ -43,7 +44,7 @@ type WithExecutionTarget<T> = T & { execution_target?: ExecutionTarget };
 
 interface SelectionState {
 	name?: string;
-	hostFallback?: boolean;
+	hostDisabled?: boolean;
 }
 
 export function withExecutionTarget<T extends Type.TProperties>(schema: Type.TObject<T>) {
@@ -325,7 +326,10 @@ async function executeSbxGrep(
 	return { content: [{ type: "text", text: output }], details: Object.keys(details).length > 0 ? details : undefined };
 }
 
-export default function piSbxExtension(pi: ExtensionAPI) {
+// Injectable dependencies keep lifecycle tests isolated from real SBX resources.
+type ConnectionOverrides = Partial<Omit<ConnectionOptions, "onChange" | "notify">>;
+
+export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOverrides = {}) {
 	const cwd = process.cwd();
 	const localRead = createReadTool(cwd);
 	const localWrite = createWriteTool(cwd);
@@ -334,85 +338,66 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	const localLs = createLsTool(cwd);
 	const localFind = createFindTool(cwd);
 	const localGrep = createGrepTool(cwd);
-	let sandboxes: SbxSandbox[] = [];
-	let sbxExecutable = "sbx";
 	let selectedName: string | undefined;
-	let sandboxingEnabled = true;
-	let transport: SbxTransport | undefined;
-	let transportSandbox: string | undefined;
+	let context: ExtensionContext | undefined;
+	let commandController = new AbortController();
+	let sessionGeneration = 0;
 	let discoveredSkills: DiscoveredSkillPath[] = [];
 	const approvedHostCalls = new Map<string, string>();
-
-	function disposeTransport(): void {
-		transport?.dispose();
-		transport = undefined;
-		transportSandbox = undefined;
-	}
-
-	function selectedTransport(): SbxTransport | undefined {
-		const sandbox = selectedSandbox();
-		if (!sandbox) {
-			disposeTransport();
-			return undefined;
-		}
-		if (!transport || transportSandbox !== sandbox) {
-			disposeTransport();
-			transport = new SbxTransport(sandbox, cwd, {
-				executable: sbxExecutable,
-				paths: new WorkspacePaths(sandboxes.find((entry) => entry.name === sandbox)?.mounts),
-			});
-			transportSandbox = sandbox;
-		}
-		return transport;
-	}
+	const connection = new SandboxConnection({
+		discover: async (signal, timeoutMs) => {
+			const executable = resolveSbxExecutable();
+			return { executable, sandboxes: await discoverSandboxes(pi.exec.bind(pi), executable, cwd, undefined, { signal, timeoutMs }) };
+		},
+		createTransport: (sandbox, executable, onInitializing, onFailure) => new SbxTransport(sandbox.name, cwd, {
+			executable, paths: new WorkspacePaths(sandbox.mounts), onInitializing, onFailure,
+		}),
+		...overrides,
+		onChange: (state) => {
+			if (state.sandbox) selectedName = state.sandbox.name;
+			if (state.phase === "ready") pi.appendEntry<SelectionState>(STATE_ENTRY, { name: state.sandbox!.name });
+			updateStatus();
+		},
+		notify: (message) => context?.ui.notify(message, "warning"),
+	});
 
 	function restoredSelection(ctx: ExtensionContext): SelectionState | undefined {
 		let restored: SelectionState | undefined;
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
 			const data = entry.data as SelectionState | undefined;
-			if (typeof data?.name === "string") restored = { name: data.name };
-			else if (data?.hostFallback === true) restored = { hostFallback: true };
+			if (data?.hostDisabled === true) restored = { hostDisabled: true };
+			else if (typeof data?.name === "string") restored = { name: data.name };
+			else if (data?.hostDisabled === false) restored = {};
 		}
 		return restored;
 	}
 
-	function updateStatus(ctx: ExtensionContext): void {
-		if (sandboxingEnabled && selectedName) {
-			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("muted", `sbx: ${selectedName}`));
-		} else {
-			ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("warning", "sbx: host fallback"));
-		}
-	}
-
-	async function discover(ctx: ExtensionContext): Promise<SbxSandbox[]> {
-		const executable = resolveSbxExecutable();
-		const discovered = await discoverSandboxes(pi.exec.bind(pi), executable, cwd);
-		// Refresh executable and mount mappings together; don't reuse a worker with stale paths.
-		disposeTransport();
-		sbxExecutable = executable;
-		sandboxes = discovered;
-		if (selectedName && !sandboxes.some((sandbox) => sandbox.name === selectedName)) {
-			selectedName = undefined;
-			disposeTransport();
-		}
-		updateStatus(ctx);
-		return sandboxes;
-	}
-
-	function selectedSandbox(): string | undefined {
-		return sandboxingEnabled ? selectedName : undefined;
+	function updateStatus(): void {
+		if (!context) return;
+		const { phase, sandbox } = connection.state;
+		const label = phase === "ready" ? sandbox!.name
+			: phase === "host" ? "host (disabled)"
+			: phase === "waiting" ? "waiting for sandbox"
+			: `${phase}${sandbox ? `: ${sandbox.name}` : ""}`;
+		context.ui.setStatus(STATUS_ID, context.ui.theme.fg(phase === "ready" ? "muted" : "warning", `sbx: ${label}`));
 	}
 
 	function useHostFallback(ctx: ExtensionContext): void {
-		sandboxingEnabled = false;
-		disposeTransport();
-		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostFallback: true });
-		updateStatus(ctx);
+		connection.host();
+		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostDisabled: true });
+		ctx.ui.notify("Sandboxing disabled for this session; tool calls now run on the host.", "info");
+	}
+
+	function startSandbox(preferredName?: string, list?: SandboxList): void {
+		// Persist intent before connecting. Reload during a failed/pending /sbx on
+		// must not restore an earlier explicit host choice.
+		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostDisabled: false, name: preferredName });
+		connection.start(preferredName, list);
 	}
 
 	function requireApprovedHostExecution(toolName: string, id: string, params: Record<string, unknown>): void {
-		if (!selectedSandbox()) return;
+		if (connection.state.phase === "host") return;
 		const approvedFingerprint = approvedHostCalls.get(id);
 		approvedHostCalls.delete(id);
 		if (approvedFingerprint !== hostRequestFingerprint(toolName, params)) {
@@ -430,12 +415,12 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localRead.name, id, params);
 				return localRead.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
-			if (!activeTransport) return localRead.execute(id, toolParams, signal, onUpdate);
 			const hostSkillPath = await resolveHostSkillReadPath(toolParams.path, cwd, discoveredSkills);
 			if (hostSkillPath) {
 				return localRead.execute(id, { ...toolParams, path: hostSkillPath }, signal, onUpdate);
 			}
+			const activeTransport = await connection.requireTransport(signal);
+			if (!activeTransport) return localRead.execute(id, toolParams, signal, onUpdate);
 			return createReadTool(cwd, { operations: createSbxReadOps(activeTransport, cwd) }).execute(
 				id,
 				toolParams,
@@ -454,7 +439,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localWrite.name, id, params);
 				return localWrite.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localWrite.execute(id, toolParams, signal, onUpdate);
 			return createWriteTool(cwd, { operations: createSbxWriteOps(activeTransport, cwd) }).execute(
 				id,
@@ -474,7 +459,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localEdit.name, id, params);
 				return localEdit.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localEdit.execute(id, toolParams, signal, onUpdate);
 			return createEditTool(cwd, { operations: createSbxEditOps(activeTransport, cwd) }).execute(
 				id,
@@ -494,7 +479,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localBash.name, id, params);
 				return localBash.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localBash.execute(id, toolParams, signal, onUpdate);
 			return createBashTool(cwd, { operations: createSbxBashOps(activeTransport) }).execute(
 				id,
@@ -514,7 +499,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localLs.name, id, params);
 				return localLs.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localLs.execute(id, toolParams, signal, onUpdate);
 			return createLsTool(cwd, { operations: createSbxLsOps(activeTransport, cwd) }).execute(
 				id,
@@ -534,7 +519,7 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localFind.name, id, params);
 				return localFind.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localFind.execute(id, toolParams, signal, onUpdate);
 			return createFindTool(cwd, { operations: createSbxFindOps(activeTransport, cwd) }).execute(
 				id,
@@ -554,23 +539,25 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 				requireApprovedHostExecution(localGrep.name, id, params);
 				return localGrep.execute(id, toolParams, signal, onUpdate);
 			}
-			const activeTransport = selectedTransport();
+			const activeTransport = await connection.requireTransport(signal);
 			if (!activeTransport) return localGrep.execute(id, toolParams, signal, onUpdate);
 			return executeSbxGrep(activeTransport, cwd, toolParams, signal);
 		},
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (!selectedSandbox() || !ROUTED_TOOLS.has(event.toolName)) return;
+		if (connection.state.phase === "host" || !ROUTED_TOOLS.has(event.toolName)) return;
 		const input = event.input as Record<string, unknown>;
 		if (input.execution_target !== "host") return;
 		if (!ctx.hasUI) {
 			return { block: true, reason: "Host execution requires user approval, but no interactive UI is available." };
 		}
+		const generation = sessionGeneration;
 		const approved = await ctx.ui.confirm(
 			"Allow host execution?",
 			hostApprovalMessage(event.toolName, input, cwd),
 		);
+		if (generation !== sessionGeneration) return { block: true, reason: "Session changed during host approval." };
 		if (!approved) return { block: true, reason: "Host execution was denied by the user." };
 		approvedHostCalls.set(event.toolCallId, hostRequestFingerprint(event.toolName, input));
 	});
@@ -580,8 +567,14 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("user_bash", () => {
-		const activeTransport = selectedTransport();
-		return activeTransport ? { operations: createSbxBashOps(activeTransport) } : undefined;
+		if (connection.state.phase === "host") return undefined;
+		// Always claim sandbox-mode commands. Handler errors can fall through to
+		// host execution in Pi runtimes; operation failures cannot.
+		return { operations: { exec: async (command, cwd, options) => {
+			const transport = await connection.requireTransport(options.signal);
+			if (!transport) throw new Error("Tool execution environment changed; retry the command.");
+			return createSbxBashOps(transport).exec(command, cwd, options);
+		} } };
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -589,8 +582,9 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 			filePath,
 			baseDir,
 		}));
-		const sandbox = selectedSandbox();
-		const sandboxCwd = new WorkspacePaths(sandboxes.find((entry) => entry.name === sandbox)?.mounts).toSandbox(cwd);
+		const state = connection.state;
+		const sandbox = state.phase === "ready" ? state.sandbox?.name : undefined;
+		const sandboxCwd = new WorkspacePaths(state.sandbox?.mounts).toSandbox(cwd);
 		const hostTools = pi
 			.getActiveTools()
 			.filter((name) => !ROUTED_TOOLS.has(name))
@@ -604,92 +598,83 @@ export default function piSbxExtension(pi: ExtensionAPI) {
 						? `Active extension tools that run on the host by default (up to ${MAX_HOST_TOOL_NAMES}): ${hostTools.join(", ")}.`
 						: "No active extension tools run on the host by default.",
 				].join("\n")
-			: "Tool execution environment: host fallback. Sandboxing is disabled or no matching sbx sandbox is available, so Pi tools run directly on the host as they normally do. execution_target does not require approval in this mode.";
+			: state.phase === "host"
+				? "Tool execution environment: host. Sandboxing was explicitly disabled, so Pi tools run directly on the host. execution_target does not require approval in this mode."
+				: `Tool execution environment: sandboxing enabled, ${state.phase}. Routed filesystem and shell tools enforce readiness and never fall back to the host. They become available automatically when the sandbox is ready. Do not repeatedly retry unavailable tools. Explicit execution_target: "host" requires user approval even while waiting. The user can choose /sbx off for host execution. ${state.error ?? ""}`;
 		const systemPrompt = sandbox ? event.systemPrompt.replace(`Current working directory: ${cwd}`, `Current working directory: ${sandboxCwd}`) : event.systemPrompt;
 		return { systemPrompt: `${systemPrompt}\n\n${environment}` };
 	});
 
 	pi.on("session_shutdown", () => {
+		sessionGeneration++;
+		commandController.abort();
 		approvedHostCalls.clear();
 		discoveredSkills = [];
-		disposeTransport();
+		connection.close();
+		context = undefined;
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
+		sessionGeneration++;
+		commandController.abort();
+		commandController = new AbortController();
+		approvedHostCalls.clear();
+		discoveredSkills = [];
+		context = ctx;
 		const restored = restoredSelection(ctx);
-		sandboxingEnabled = restored?.hostFallback !== true;
-		try {
-			await discover(ctx);
-			if (sandboxingEnabled) {
-				selectedName = sandboxes.find((sandbox) => sandbox.name === restored?.name)?.name ?? sandboxes[0]?.name;
-			}
-			updateStatus(ctx);
-			if (!selectedSandbox()) {
-				ctx.ui.notify(`No sbx sandbox is active for ${cwd}. Tool calls will run on the host.`, "warning");
-			}
-		} catch (error) {
-			selectedName = undefined;
-			updateStatus(ctx);
-			ctx.ui.notify(`Could not discover sbx sandboxes; tool calls will run on the host: ${error instanceof Error ? error.message : String(error)}`, "warning");
-		}
+		selectedName = restored?.name;
+		if (restored?.hostDisabled) connection.host();
+		else connection.start(selectedName);
 	});
 
 	pi.registerCommand("sbx", {
-		description: "Select an sbx sandbox, or use /sbx off to run tools on the host",
+		description: "Select/retry an sbx sandbox, or use /sbx off to run tools on the host",
 		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
+			commandController.abort();
+			const controller = new AbortController();
+			commandController = controller;
 			const action = args.trim().toLowerCase();
 			if (action === "off" || action === "host") {
 				useHostFallback(ctx);
-				ctx.ui.notify("Sandboxing disabled for this session; tool calls now run on the host.", "info");
 				return;
 			}
 			if (action && action !== "on") {
 				ctx.ui.notify("Usage: /sbx, /sbx on, or /sbx off", "warning");
 				return;
 			}
+			await ctx.waitForIdle();
+			if (controller.signal.aborted) return;
+			if (action === "on") {
+				startSandbox(selectedName);
+				return;
+			}
+			let list;
 			try {
-				await discover(ctx);
-			} catch (error) {
-				useHostFallback(ctx);
-				ctx.ui.notify(`Could not discover sbx sandboxes; tool calls will run on the host: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				list = await connection.list(controller.signal);
+			} catch {
+				if (!controller.signal.aborted) ctx.ui.notify("Could not discover sbx sandboxes. The execution mode was not changed. Run /sbx to retry or /sbx off for host execution.", "warning");
 				return;
 			}
-			if (sandboxes.length === 0) {
-				ctx.ui.notify(`No sbx sandbox mounts ${cwd}; tool calls will run on the host.`, "warning");
-				return;
-			}
-			if (action === "on" && selectedName && sandboxes.some((sandbox) => sandbox.name === selectedName)) {
-				sandboxingEnabled = true;
-				pi.appendEntry<SelectionState>(STATE_ENTRY, { name: selectedName });
-				updateStatus(ctx);
-				ctx.ui.notify(`Tool calls now execute in ${selectedName}.`, "info");
+			if (controller.signal.aborted) return;
+			if (list.sandboxes.length === 0) {
+				if (connection.state.phase === "host") {
+					ctx.ui.notify("No sandbox mounts this workspace. Host execution remains enabled; use /sbx on to wait for a sandbox.", "warning");
+				} else startSandbox(selectedName, list);
 				return;
 			}
 			const hostLabel = "Host (disable sandboxing)";
-			const labels = [
-				hostLabel,
-				...sandboxes.map((sandbox) => {
-					const selected = sandboxingEnabled && sandbox.name === selectedName ? " • selected" : "";
-					return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
-				}),
-			];
+			const labels = [hostLabel, ...list.sandboxes.map((sandbox) => {
+				const selected = connection.state.phase !== "host" && sandbox.name === selectedName ? " • selected" : "";
+				return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
+			})];
 			const choice = await ctx.ui.select("Tool execution environment", labels);
-			if (!choice) return;
+			if (controller.signal.aborted || !choice) return;
 			if (choice === hostLabel) {
 				useHostFallback(ctx);
-				ctx.ui.notify("Sandboxing disabled for this session; tool calls now run on the host.", "info");
 				return;
 			}
-			const index = labels.indexOf(choice) - 1;
-			const nextName = sandboxes[index]?.name;
-			if (!nextName) return;
-			if (selectedName !== nextName) disposeTransport();
-			selectedName = nextName;
-			sandboxingEnabled = true;
-			pi.appendEntry<SelectionState>(STATE_ENTRY, { name: selectedName });
-			updateStatus(ctx);
-			ctx.ui.notify(`Tool calls now execute in ${selectedName}.`, "info");
+			const sandbox = list.sandboxes[labels.indexOf(choice) - 1];
+			if (sandbox) startSandbox(sandbox.name, list);
 		},
 	});
 }

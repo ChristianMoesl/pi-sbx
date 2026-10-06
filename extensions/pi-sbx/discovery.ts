@@ -70,8 +70,17 @@ export async function discoverSandboxes(
 	executable: string,
 	cwd: string,
 	wsl = isWsl(),
+	options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<SbxSandbox[]> {
-	const result = await exec(executable, ["ls", "--json"], { timeout: 10_000 });
+	const deadline = Date.now() + (options.timeoutMs ?? 10_000);
+	const remaining = () => {
+		if (options.signal?.aborted) throw new Error("aborted");
+		const milliseconds = deadline - Date.now();
+		if (milliseconds <= 0) throw new Error("Sandbox discovery timed out");
+		return milliseconds;
+	};
+	const result = await exec(executable, ["ls", "--json"], { timeout: remaining(), signal: options.signal });
+	remaining();
 	if (result.code !== 0 || result.killed) {
 		throw new Error(result.stderr.trim() || `${executable} ls --json ${result.killed ? "timed out" : `exited with code ${result.code}`}`);
 	}
@@ -85,7 +94,8 @@ export async function discoverSandboxes(
 	));
 	for (const workspace of windowsWorkspaces) {
 		// wslpath understands distro aliases and custom automount roots. Never guess /mnt/<drive>.
-		const converted = await exec("wslpath", ["-u", workspace], { timeout: 5_000 });
+		const converted = await exec("wslpath", ["-u", workspace], { timeout: Math.min(5_000, remaining()), signal: options.signal });
+		remaining();
 		const hostPath = converted.stdout.replace(/\r?\n$/, "");
 		if (converted.code === 0 && !converted.killed && hostPath.startsWith("/")) {
 			hostPaths.set(workspace, hostPath);

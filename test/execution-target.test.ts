@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
+import { spawn } from "node:child_process";
+import { SBX_WORKER_SCRIPT, SbxTransport } from "../extensions/pi-sbx/transport.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import piSbxExtension, {
 	hostApprovalMessage,
@@ -17,7 +19,16 @@ type RegisteredTool = {
 	execute: (...args: any[]) => Promise<any>;
 };
 
+const harnesses: Harness[] = [];
+afterEach(async () => {
+	for (const harness of harnesses.splice(0)) await harness.emit("session_shutdown", {});
+});
+
 interface Harness {
+	commands: Map<string, any>;
+	notifications: string[];
+	statuses: string[];
+	entries: any[];
 	tools: Map<string, RegisteredTool>;
 	handlers: Map<string, Handler[]>;
 	context: ExtensionContext;
@@ -26,7 +37,12 @@ interface Harness {
 	emit(eventName: string, event: any): Promise<any[]>;
 }
 
-function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTools?: string[] } = {}): Harness {
+function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTools?: string[]; host?: boolean; entries?: any[] } = {}): Harness {
+	const entries: any[] = options.entries ?? (options.host
+		? [{ type: "custom", customType: "pi-sbx-selection", data: { hostDisabled: true } }] : []);
+	const commands = new Map<string, any>();
+	const notifications: string[] = [];
+	const statuses: string[] = [];
 	const tools = new Map<string, RegisteredTool>();
 	const handlers = new Map<string, Handler[]>();
 	const confirmations: Array<{ title: string; message: string }> = [];
@@ -37,13 +53,14 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 		hasUI: options.hasUI ?? true,
 		mode: options.hasUI === false ? "print" : "tui",
 		cwd: process.cwd(),
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => entries },
+		waitForIdle: async () => {},
 		ui: {
 			theme: {
 				fg: (_color: string, text: string) => text,
 			},
-			setStatus: () => {},
-			notify: () => {},
+			setStatus: (_key: string, text: string) => statuses.push(text),
+			notify: (message: string) => notifications.push(message),
 			select: async () => undefined,
 			confirm: async (title: string, message: string) => {
 				confirmations.push({ title, message });
@@ -56,13 +73,13 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 		registerTool(tool: RegisteredTool) {
 			tools.set((tool as RegisteredTool & { name: string }).name, tool);
 		},
-		registerCommand() {},
+		registerCommand(name: string, command: any) { commands.set(name, command); },
 		on(eventName: string, handler: Handler) {
 			const registered = handlers.get(eventName) ?? [];
 			registered.push(handler);
 			handlers.set(eventName, registered);
 		},
-		appendEntry() {},
+		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
 		getActiveTools: () => options.activeTools ?? [...ROUTED_TOOLS],
 		exec: async () => ({
 			code: 0,
@@ -75,9 +92,19 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 		}),
 	} as unknown as ExtensionAPI;
 
-	piSbxExtension(pi);
+	piSbxExtension(pi, {
+		toolWaitMs: 10,
+		pollIntervalMs: 20,
+		createTransport: (_sandbox, _executable, onInitializing, onFailure) => new SbxTransport("test", process.cwd(), {
+			onInitializing, onFailure,
+			spawnWorker: () => spawn(process.execPath, ["-e", SBX_WORKER_SCRIPT], {
+				env: { ...process.env, SBX_STARTUP_DIR: "" }, detached: true, stdio: ["pipe", "pipe", "pipe"],
+			}),
+		}),
+	});
 
-	return {
+	const harness: Harness = {
+		commands, notifications, statuses, entries,
 		tools,
 		handlers,
 		context,
@@ -91,10 +118,14 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 			return results;
 		},
 	};
+	harnesses.push(harness);
+	return harness;
 }
 
 async function startHarness(harness: Harness): Promise<void> {
 	await harness.emit("session_start", { reason: "startup" });
+	// Let initial discovery settle; connection establishment remains asynchronous.
+	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function toolCall(toolName: string, toolCallId: string, input: Record<string, unknown>) {
@@ -254,8 +285,8 @@ test("rejects execution when the approved host arguments were changed", async ()
 	);
 });
 
-test("does not ask for approval in host fallback mode", async () => {
-	const harness = createHarness({ sandbox: false });
+test("does not ask for approval in explicitly restored host mode", async () => {
+	const harness = createHarness({ host: true });
 	await startHarness(harness);
 	const input = { path: "README.md", limit: 1, execution_target: "host" as const };
 
@@ -307,10 +338,15 @@ test("reads Pi-discovered skills from the host while sandboxing is active", asyn
 	assert.equal(harness.confirmations.length, 0);
 });
 
-test("adds opinionated host-execution guidance only when a sandbox is active", async () => {
+test("describes connected, waiting and explicitly disabled sandboxing accurately", async () => {
 	const extensionTools = Array.from({ length: 12 }, (_, index) => `host-tool-${String(index + 1).padStart(2, "0")}`);
 	const sandboxed = createHarness({ activeTools: [...ROUTED_TOOLS, ...extensionTools] });
 	await startHarness(sandboxed);
+	for (let attempt = 0; sandboxed.statuses.at(-1) !== "sbx: test-sandbox" && attempt < 100; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	assert.equal(sandboxed.statuses.at(-1), "sbx: test-sandbox");
+	assert.deepEqual(sandboxed.notifications, []);
 	const [sandboxPrompt] = await sandboxed.emit("before_agent_start", { systemPrompt: "base" });
 	assert.match(sandboxPrompt.systemPrompt, /Use "host" only when absolutely necessary/);
 	assert.match(sandboxPrompt.systemPrompt, /requires explicit user approval and interrupts the user/);
@@ -321,9 +357,82 @@ test("adds opinionated host-execution guidance only when a sandbox is active", a
 	assert.doesNotMatch(sandboxPrompt.systemPrompt, /host-tool-11|host-tool-12/);
 	assert.doesNotMatch(sandboxPrompt.systemPrompt, /host by default.*\b(?:bash|read|write)\b/);
 
-	const fallback = createHarness({ sandbox: false });
+	const waiting = createHarness({ sandbox: false });
+	await startHarness(waiting);
+	const [waitingPrompt] = await waiting.emit("before_agent_start", { systemPrompt: "base" });
+	assert.match(waitingPrompt.systemPrompt, /sandboxing enabled, waiting/);
+	assert.match(waitingPrompt.systemPrompt, /never fall back to the host/);
+
+	const fallback = createHarness({ host: true });
 	await startHarness(fallback);
 	const [fallbackPrompt] = await fallback.emit("before_agent_start", { systemPrompt: "base" });
 	assert.doesNotMatch(fallbackPrompt.systemPrompt, /Use "host" only when absolutely necessary/);
 	assert.match(fallbackPrompt.systemPrompt, /does not require approval in this mode/);
+});
+
+
+test("missing sandbox blocks every routed tool and user bash, not explicit approved host calls", async () => {
+	const harness = createHarness({ sandbox: false });
+	await startHarness(harness);
+	assert.equal(harness.notifications.length, 1);
+	assert.match(harness.notifications[0]!, /Waiting for a sandbox.*\/sbx off/);
+	const calls = {
+		bash: { command: "printf unsafe" }, read: { path: "README.md" },
+		write: { path: "/never-write-this", content: "unsafe" },
+		edit: { path: "/never-edit-this", edits: [{ oldText: "a", newText: "b" }] },
+		ls: {}, find: { pattern: "*" }, grep: { pattern: "test" },
+	};
+	for (const name of ROUTED_TOOLS) {
+		await assert.rejects(harness.tools.get(name)!.execute(name, calls[name]), /Sandbox not ready/);
+	}
+	const [bashHandler] = await harness.emit("user_bash", { command: "printf unsafe" });
+	assert.ok(bashHandler.operations, "claim the command rather than allowing Pi's host fallback");
+	await assert.rejects(bashHandler.operations.exec("printf unsafe", process.cwd(), { onData() {} }), /Sandbox not ready/);
+	assert.equal(harness.notifications.length, 1, "no per-tool notifications");
+
+	const input = { path: "README.md", limit: 1, execution_target: "host" };
+	await assert.rejects(harness.tools.get("read")!.execute("unapproved", input), /not approved/);
+	await harness.emit("tool_call", toolCall("read", "approved-waiting", input));
+	assert.equal(harness.confirmations.length, 1);
+	const result = await harness.tools.get("read")!.execute("approved-waiting", input);
+	assert.match(result.content[0].text, /pi-sbx/);
+});
+
+test("sbx off immediately permits host execution and stops waiting", async () => {
+	const harness = createHarness({ sandbox: false });
+	await startHarness(harness);
+	await harness.commands.get("sbx").handler("off", harness.context);
+	assert.equal(harness.statuses.at(-1), "sbx: host (disabled)");
+	const result = await harness.tools.get("read")!.execute("host-read", { path: "README.md", limit: 1 });
+	assert.match(result.content[0].text, /pi-sbx/);
+	assert.deepEqual(await harness.emit("user_bash", {}), [undefined]);
+});
+
+
+test("old automatic host-fallback records are not restored as user consent", async () => {
+	const harness = createHarness({ sandbox: false, entries: [
+		{ type: "custom", customType: "pi-sbx-selection", data: { hostFallback: true } },
+	] });
+	await startHarness(harness);
+	assert.equal(harness.statuses.at(-1), "sbx: waiting for sandbox");
+	await assert.rejects(harness.tools.get("read")!.execute("legacy", { path: "README.md" }), /Sandbox not ready/);
+});
+
+test("enabling sandboxing persists intent before readiness, including across session replacement", async () => {
+	const harness = createHarness({ sandbox: false, host: true });
+	await startHarness(harness);
+	await harness.commands.get("sbx").handler("on", harness.context);
+	assert.equal(harness.entries.at(-1).data.hostDisabled, false);
+	await harness.emit("session_shutdown", {});
+	await startHarness(harness);
+	await assert.rejects(harness.tools.get("read")!.execute("reloaded", { path: "README.md" }), /Sandbox not ready/);
+	assert.equal(harness.statuses.at(-1), "sbx: waiting for sandbox");
+});
+
+test("sbx off cancels waiting without waiting for the agent to become idle", async () => {
+	const harness = createHarness({ sandbox: false });
+	await startHarness(harness);
+	(harness.context as any).waitForIdle = () => { throw new Error("must not await agent idleness"); };
+	await harness.commands.get("sbx").handler("off", harness.context);
+	assert.equal(harness.statuses.at(-1), "sbx: host (disabled)");
 });

@@ -5,6 +5,10 @@ const readline = require("node:readline");
 
 const processes = new Map();
 const cancelled = new Set();
+let ready = false;
+let stopping = false;
+let startupProcess;
+let startupTimer;
 
 function emit(message) {
 	process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -29,6 +33,10 @@ function killProcess(child) {
 
 function execute(request) {
 	const id = request.id;
+	if (!ready || stopping) {
+		emit({ type: "error", id, message: "Sandbox worker is not ready; command was not executed" });
+		return;
+	}
 	if (cancelled.delete(id)) {
 		emit({ type: "error", id, message: "aborted" });
 		return;
@@ -79,6 +87,9 @@ function cancel(id) {
 }
 
 function shutdown() {
+	stopping = true;
+	if (startupTimer) clearTimeout(startupTimer);
+	startupProcess?.kill("SIGKILL");
 	for (const child of processes.values()) killProcess(child);
 }
 
@@ -97,4 +108,41 @@ input.on("line", (line) => {
 	}
 });
 input.on("close", shutdown);
-emit({ type: "ready" });
+
+function markReady() {
+	if (stopping) return;
+	ready = true;
+	emit({ type: "ready" });
+}
+
+// The image owns hook execution and private, boot-scoped state. Observe its
+// command contract only: never run hooks, parse state files, or expose output.
+if (!process.env.SBX_STARTUP_DIR) {
+	markReady();
+} else {
+	emit({ type: "initializing" });
+	let finished = false;
+	const finish = (message) => {
+		if (finished || stopping) return;
+		finished = true;
+		clearTimeout(startupTimer);
+		if (message) {
+			emit({ type: "startup_error", message });
+			shutdown();
+			input.close();
+			process.stdin.destroy();
+			process.exitCode = 1;
+		} else {
+			markReady();
+		}
+	};
+	// Share the worker's process group so forced transport cleanup also kills
+	// the readiness observer and its descendants, not independent image hooks.
+	startupProcess = spawn("sandbox-startup", ["wait", "--timeout", "60"], { stdio: "ignore" });
+	startupTimer = setTimeout(() => finish("Startup initialization timed out; inspect the image's startup hooks."), 60_000);
+	startupProcess.once("error", (error) => finish(error.code === "ENOENT"
+		? "SBX_STARTUP_DIR is configured but sandbox-startup is unavailable."
+		: "Could not start the image's readiness check."));
+	startupProcess.once("close", (code) => finish(code === 0 ? undefined
+		: "Startup initialization failed; inspect the image's private startup log."));
+}

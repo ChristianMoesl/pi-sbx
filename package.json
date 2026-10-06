@@ -28,6 +28,7 @@
   },
   "files": [
     "extensions",
+    "docs",
     "LICENSE",
     "README.md"
   ],

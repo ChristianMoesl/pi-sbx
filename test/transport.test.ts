@@ -6,6 +6,7 @@ import { SBX_WORKER_SCRIPT, SbxTransport, type SpawnWorker } from "../extensions
 
 const spawnLocalWorker: SpawnWorker = () =>
 	spawn(process.execPath, ["-e", SBX_WORKER_SCRIPT], {
+		env: { ...process.env, SBX_STARTUP_DIR: "" },
 		detached: true,
 		stdio: ["pipe", "pipe", "pipe"],
 	});

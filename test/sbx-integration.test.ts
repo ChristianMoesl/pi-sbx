@@ -29,7 +29,7 @@ test("real SBX routes all tools and user bash through mapped workspaces", { skip
 	} as unknown as ExtensionContext;
 	const exec: ExtensionAPI["exec"] = async (command, args, options) => {
 		try {
-			const result = await promisify(execFile)(command, args, { timeout: options?.timeout });
+			const result = await promisify(execFile)(command, args, { timeout: options?.timeout, signal: options?.signal });
 			return { ...result, code: 0, killed: false };
 		} catch (error) {
 			const failure = error as Error & { code?: number; stdout?: string; stderr?: string; killed?: boolean };
@@ -51,8 +51,12 @@ test("real SBX routes all tools and user bash through mapped workspaces", { skip
 		exec,
 	} as unknown as ExtensionAPI);
 	await handlers.get("session_start")!({}, context);
+	const deadline = Date.now() + 140_000;
+	while (/^sbx: (waiting|connecting|initializing)/.test(status) && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
 	assert.match(status, /^sbx: /);
-	assert.doesNotMatch(status, /host fallback/, "integration test must never silently run on the host");
+	assert.doesNotMatch(status, /^sbx: (host|waiting|connecting|initializing|failed|closed)(:| |$)/, "integration test requires a ready sandbox");
 
 	let callId = 0;
 	async function call(name: string, input: object): Promise<string> {

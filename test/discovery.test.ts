@@ -99,3 +99,24 @@ test("discovery reports CLI failures and timeouts rather than trying another ins
 		code: 0, killed: true, stdout: "", stderr: "",
 	}), "sbx.exe", cwd), /sbx\.exe ls --json timed out/);
 });
+
+test("discovery forwards cancellation and does not accept results after cancellation", async () => {
+	const controller = new AbortController();
+	let calls = 0;
+	await assert.rejects(discoverSandboxes(async (_command, _args, options) => {
+		calls++;
+		assert.equal(options?.signal, controller.signal);
+		assert.ok(options!.timeout! > 0 && options!.timeout! <= 1_000);
+		controller.abort();
+		return { code: 0, killed: false, stderr: "", stdout: JSON.stringify({ sandboxes: [] }) };
+	}, "sbx", cwd, false, { signal: controller.signal, timeoutMs: 1_000 }), /aborted/);
+	assert.equal(calls, 1);
+});
+
+test("already cancelled discovery never spawns a command", async () => {
+	const controller = new AbortController();
+	controller.abort();
+	await assert.rejects(discoverSandboxes(async () => {
+		assert.fail("must not execute after cancellation");
+	}, "sbx", cwd, false, { signal: controller.signal }), /aborted/);
+});

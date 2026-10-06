@@ -13,7 +13,7 @@ Running Pi itself in a sandbox means mounting its configuration, provider creden
 - To use sandboxing: an SBX sandbox that directly mounts Pi's current working directory (or a parent directory)
 - To use sandboxing: Node.js, Bash, `sh`, `rg`, and `file` in the sandbox image
 
-Without SBX, the extension remains usable and leaves Pi's standard host tools unchanged.
+Sandboxing is enabled by default. If SBX is missing, unavailable, or still being created, routed tools do **not** silently run on the host. Use `/sbx off` to explicitly use Pi's normal host tools; chatting remains available throughout startup.
 
 The extension supports macOS hosts and Pi running inside WSL2 with Windows Docker Sandboxes. Sandboxes must run Linux. WSL2 integration has been tested with `sbx.exe` v0.43.0, using both WSL-filesystem and Windows-drive workspaces. Running Pi directly in native Windows Node.js is not yet supported; run Pi inside WSL instead.
 
@@ -57,7 +57,7 @@ Start Pi on the host from that workspace:
 pi
 ```
 
-`pi-sbx` discovers sandboxes using `sbx ls --json`. It keeps sandboxes whose workspace mounts contain Pi's current working directory, preferring a running sandbox and then sorting by name. A stopped sandbox is valid because `sbx exec` starts it automatically. Use direct workspace mounts, not SBX's `--clone` mode.
+`pi-sbx` discovers sandboxes using `sbx ls --json`. It keeps sandboxes whose workspace mounts contain Pi's current working directory, preferring a running sandbox and then sorting by name. A stopped sandbox is valid because `sbx exec` starts it automatically when pi-sbx connects in the background. Use direct workspace mounts, not SBX's `--clone` mode. A saved sandbox selection is retained: pi-sbx waits for that name rather than silently choosing a different sandbox if it is missing.
 
 ### Windows / WSL2
 
@@ -90,7 +90,7 @@ PI_SBX_EXECUTABLE="$(command -v sbx.exe)" pi
 
 Windows SBX mounts have different paths inside the sandbox: `C:\Users\you\project` becomes `/c/Users/you/project`, and `\\wsl.localhost\Ubuntu\home\you\project` becomes `/wsl.localhost/Ubuntu/home/you/project`. pi-sbx uses `wslpath` for discovery and translates filesystem-tool paths and working directories. The agent is told the sandbox working directory. Bash and `!` command text is **not** rewritten: use relative paths or Linux sandbox paths in shell commands.
 
-If the footer says **`sbx: host fallback`**, tools are running on the host, not in a sandbox. Check `sbx.exe ls --json` and run `/sbx` to refresh discovery.
+If the footer says **`sbx: host (disabled)`**, host execution was explicitly enabled. Discovery or initialization failures never switch to this mode. Check `sbx.exe ls --json` and run `/sbx` to refresh discovery, or `/sbx on` to reconnect.
 
 ## Usage
 
@@ -100,7 +100,33 @@ The selected sandbox appears in Pi's footer:
 sbx: my-workspace
 ```
 
-Run `/sbx` to refresh discovery and switch the sandbox used for tool execution. Select **Host (disable sandboxing)** in that menu, or run `/sbx off`, to disable sandboxing for the current session. Run `/sbx on` to re-enable the previously selected sandbox.
+Run `/sbx` to refresh discovery and select a sandbox. With no matching sandbox and sandboxing enabled, this restarts background discovery. Select **Host (disable sandboxing)** in that menu, or run `/sbx off`, to disable sandboxing for the current session. Run `/sbx on` to reconnect to the previously selected sandbox, or discover one if none was selected.
+
+### Starting before a sandbox exists
+
+Pi starts without waiting for discovery or image initialization. pi-sbx checks immediately and, if no matching sandbox exists, polls roughly once per second for up to one minute. It emits one notification:
+
+> Waiting for a sandbox for this workspace. You can keep chatting. Use /sbx off to run tools on the host.
+
+When a sandbox appears, pi-sbx connects its worker in the background and honors the image's optional startup readiness contract. Tools become available **as soon as it is ready**, not after a fixed delay. The footer shows waiting, connecting, initializing, the ready sandbox name, or failure. **Successful discovery/readiness produces no notification.** Discovery expiry, discovery errors, and initialization failures produce one actionable warning per attempt.
+
+A routed tool requested before readiness waits at most about **two seconds** for preparation, then fails with an explanation if still unavailable. It is not queued for later execution. Abort cancels that call's wait, not shared preparation. Unrelated trusted host-extension tools and the existing discovered-skill read exception remain available.
+
+`/sbx off` cancels discovery/connection and enables host tools; a late result cannot select a sandbox afterward. Explicit host-targeted calls can also be approved individually while waiting. On failure, tools stay unavailable until retry or an explicit host choice. Use `/sbx` to inspect/select/retry, or `/sbx on` to restart connection to the saved selection. Fixing a failed image hook is the image's responsibility; pi-sbx never reruns hooks itself.
+
+**Behavior change:** previous versions automatically fell back to host tools on missing SBX or discovery failure. They also sometimes persisted that fallback, so an old `hostFallback` session entry is not proof of user consent. Those old host-mode entries are no longer restored: use `/sbx off` once after upgrading if host execution is intended. New explicit host choices are persisted and restored normally; saved sandbox names and conversation history are unchanged.
+
+### Optional image startup readiness
+
+An image can opt in by setting a nonempty `SBX_STARTUP_DIR` **inside the sandbox** and providing this executable on its sandbox `PATH`:
+
+```sh
+sandbox-startup wait --timeout 60
+```
+
+The pi-sbx worker runs that command before reporting ready. Exit zero enables sandbox tools; a missing helper, failure, or timeout keeps them unavailable. With an unset/empty variable, the worker uses normal transport readiness without invoking the helper. Pi-sbx does not execute the directory's scripts or interpret the helper's private status files.
+
+See **[the image readiness contract](docs/readiness.md)** for lifecycle guarantees, image/kit setup, timeout and cancellation semantics, diagnostics, and conformance checks. The contract is independent of Radar or any workspace launcher.
 
 The extension routes these built-in tools through `sbx exec`:
 
@@ -122,16 +148,18 @@ The routed built-in tools also accept an optional `execution_target` argument:
 }
 ```
 
-The default target is `sandbox`. While a sandbox is active, every `host` call to a routed built-in tool shows its exact operation and requires user approval. Approval applies only to that unchanged tool call; it does not disable the sandbox or approve later calls. Host requests are blocked when no interactive approval UI is available. In host-fallback mode the tools already run on the host, so no approval is requested.
+The default target is `sandbox`. While a sandbox is active, every `host` call to a routed built-in tool shows its exact operation and requires user approval. Approval applies only to that unchanged tool call; it does not disable the sandbox or approve later calls. Host requests are blocked when no interactive approval UI is available. Approval is also required while discovery or initialization is pending or failed. Only explicit host mode (`/sbx off`) skips the per-call approval.
 
 Extension-provided tools are not routed through SBX and run on the host by default without pi-sbx approval. At the start of each agent turn, pi-sbx adds up to the first 10 active host tool names to the system prompt so the model can distinguish them from sandboxed tools.
 
-If no matching sandbox exists—or `sbx` cannot be discovered—the extension falls back to Pi's normal host tools. Interactive `!` commands also run normally on the host.
+If no matching sandbox exists—or `sbx` cannot be discovered—routed tools and interactive `!` commands remain blocked. `!` commands use the same short readiness wait and never fall through to host execution. Explicit `/sbx off` enables normal host `!` commands.
 
 ## Startup warnings
 
 - **Host-provided packages in `dependencies` (`typebox`):** update `pi-sbx` to a version that declares these as `"*"` peer dependencies, then reload Pi.
-- **No sbx sandbox is active:** tools will run on the host. This is intentional when no matching sandbox is available; create a sandbox for the workspace and run `/sbx` to select it.
+- **Waiting for a sandbox:** Pi is usable for conversation; routed tools are waiting for discovery/readiness. Use `/sbx off` if host execution is intended.
+- **Discovery expired/failed:** tools remain blocked. Fix SBX access and use `/sbx` to check again, or explicitly choose host mode.
+- **Initialization failed:** inspect the image's startup configuration and private logs. A configured `SBX_STARTUP_DIR` requires `sandbox-startup` on the sandbox PATH. Fix/retry image initialization, then reconnect with `/sbx on`.
 - **`pi-mcp-adapter` replaces built-in `mcp`:** this is a Pi configuration conflict, not a `pi-sbx` error. Use `pi config` to keep only one MCP implementation enabled. If switching to built-in MCP, migrate and verify your server configuration before removing the adapter.
 
 ## Security model
@@ -142,7 +170,8 @@ If no matching sandbox exists—or `sbx` cannot be discovered—the extension fa
 - Host environment variables are not forwarded to sandboxed shell commands.
 - An approved `execution_target: "host"` call runs with Pi's normal host permissions and environment. Treat the confirmation as a sandbox escape authorization.
 - Extension-provided tools execute in Pi's host process and are not intercepted or approved by pi-sbx. Only install trusted extensions and review their tool behavior.
-- When no sandbox is available, Pi's normal host-tool behavior is preserved.
+- When no sandbox is available, routed tools fail closed. Host execution requires an explicit per-call approval or `/sbx off`; timeout never grants host access.
+- The image readiness helper is trusted image code, executed inside the sandbox. Its stdout/stderr is discarded rather than copied into the model context or notifications.
 - Do not combine `pi-sbx` with another extension that overrides the same built-in tool names.
 
 Provide required secrets through SBX policy or secret mechanisms instead of exposing the host Pi agent directory.
@@ -184,7 +213,9 @@ PI_SBX_TEST_WORKSPACE=/path/to/workspace \
   node --experimental-strip-types --import ./test/setup.ts --test test/sbx-integration.test.ts
 ```
 
-The test creates and removes a unique temporary subdirectory in that workspace. It does not create or remove sandboxes. Without this variable, the integration test is skipped.
+The unit suite uses local fixture workers and fake discovery, including delayed startup, failure, cancellation, and host-mode races; it never creates real sandboxes.
+
+The optional integration test waits for worker/image readiness, then creates and removes a unique temporary subdirectory in that workspace. It does not create or remove sandboxes. Without this variable, the integration test is skipped.
 
 ## Releasing
 

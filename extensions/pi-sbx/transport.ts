@@ -37,6 +37,8 @@ interface WorkerCancelRequest {
 type WorkerRequest = WorkerExecRequest | WorkerCancelRequest;
 
 type WorkerMessage =
+	| { type: "initializing" }
+	| { type: "startup_error"; message: string }
 	| { type: "ready" }
 	| { type: "stdout" | "stderr"; id: string; data: string }
 	| { type: "result"; id: string; exitCode: number | null }
@@ -58,6 +60,10 @@ export interface SbxTransportOptions {
 	executable?: string;
 	paths?: WorkspacePaths;
 	spawnWorker?: SpawnWorker;
+	onInitializing?: () => void;
+	onFailure?: (error: Error) => void;
+	startupTimeoutMs?: number;
+	initializationTimeoutMs?: number;
 }
 
 export const SBX_WORKER_SCRIPT = readFileSync(new URL("./worker.cjs", import.meta.url), "utf8");
@@ -87,6 +93,27 @@ function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
+/** Wait briefly without cancelling shared preparation or queuing a tool request. */
+export function waitForConnection(promise: Promise<void>, signal?: AbortSignal, timeoutMs?: number): Promise<void> {
+	if (signal?.aborted) return Promise.reject(new Error("aborted"));
+	return new Promise((resolve, reject) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (error?: unknown) => {
+			cleanup();
+			if (error) reject(error);
+			else resolve();
+		};
+		const onAbort = () => finish(new Error("aborted"));
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (timeoutMs !== undefined) timer = setTimeout(() => finish(), timeoutMs);
+		promise.then(() => finish(), finish);
+	});
+}
+
 export class SbxTransport {
 	private readonly sandbox: string;
 	private readonly workerCwd: string;
@@ -103,8 +130,11 @@ export class SbxTransport {
 	private nextId = 1;
 	private readonly pending = new Map<string, PendingExecution>();
 	private disposed = false;
+	private ready = false;
+	private readonly options: SbxTransportOptions;
 
 	constructor(sandbox: string, workerCwd: string, options: SbxTransportOptions = {}) {
+		this.options = options;
 		this.sandbox = sandbox;
 		this.paths = options.paths ?? new WorkspacePaths();
 		this.workerCwd = this.toSandboxPath(workerCwd);
@@ -116,10 +146,16 @@ export class SbxTransport {
 		return this.paths.toSandbox(value);
 	}
 
+	connect(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(new Error("aborted"));
+		return waitForConnection(this.start(), signal);
+	}
+
 	async execute(cwd: string, command: string[], options: SbxExecOptions = {}): Promise<SbxExecResult> {
 		if (options.signal?.aborted) throw new Error("aborted");
-		await this.start();
+		await waitForConnection(this.start(), options.signal, 2_000);
 		if (options.signal?.aborted) throw new Error("aborted");
+		if (!this.ready) throw new Error("Sandbox worker not ready; this tool was not executed. Try again when initialization finishes.");
 		if (!this.child) throw new Error(`sbx transport for ${this.sandbox} is not available`);
 
 		const id = String(this.nextId++);
@@ -183,6 +219,7 @@ export class SbxTransport {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.ready = false;
 		const error = new Error(`sbx transport for ${this.sandbox} was closed`);
 		this.failStart(error);
 		this.rejectPending(error);
@@ -203,6 +240,7 @@ export class SbxTransport {
 			this.rejectStart = reject;
 		});
 		this.startPromise = startPromise;
+		this.ready = false;
 		this.stdoutPending = "";
 		this.stderrPending = "";
 
@@ -211,7 +249,7 @@ export class SbxTransport {
 			this.child = child;
 			this.startupTimer = setTimeout(() => {
 				this.handleExit(child, new Error(`Timed out starting sbx transport for ${this.sandbox}`));
-			}, DEFAULT_STARTUP_TIMEOUT_MS);
+			}, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
 			child.stdout.on("data", (data: Buffer) => this.handleStdout(data));
 			child.stderr.on("data", (data: Buffer) => {
 				this.stderrPending += data.toString();
@@ -255,7 +293,20 @@ export class SbxTransport {
 	}
 
 	private handleMessage(message: WorkerMessage): void {
+		if (message.type === "initializing") {
+			if (this.startupTimer) clearTimeout(this.startupTimer);
+			this.startupTimer = setTimeout(() => {
+				if (this.child) this.handleExit(this.child, new Error(`Sandbox ${this.sandbox} startup initialization timed out`));
+			}, this.options.initializationTimeoutMs ?? 65_000);
+			this.options.onInitializing?.();
+			return;
+		}
+		if (message.type === "startup_error") {
+			if (this.child) this.handleExit(this.child, new Error(`Sandbox ${this.sandbox}: ${message.message}`));
+			return;
+		}
 		if (message.type === "ready") {
+			this.ready = true;
 			if (this.startupTimer) clearTimeout(this.startupTimer);
 			this.startupTimer = undefined;
 			this.resolveStart?.();
@@ -294,11 +345,13 @@ export class SbxTransport {
 
 	private handleExit(child: ChildProcessWithoutNullStreams, error: Error): void {
 		if (this.child !== child) return;
+		this.ready = false;
 		killProcess(child);
 		this.child = undefined;
 		this.failStart(error);
 		this.startPromise = undefined;
 		this.rejectPending(error);
+		this.options.onFailure?.(error);
 	}
 
 	private failStart(error: Error): void {
