@@ -104,7 +104,7 @@ Run `/sbx` to refresh discovery and select a sandbox. With no matching sandbox a
 
 ### Starting before a sandbox exists
 
-Pi starts without waiting for discovery or image initialization. pi-sbx checks immediately and, if no matching sandbox exists, polls roughly once per second for up to one minute. It emits one notification:
+Pi starts without waiting for discovery or image initialization. pi-sbx checks immediately and, if no matching sandbox exists, polls roughly once per second for up to one minute. It emits one informational notification (not a warning):
 
 > Waiting for a sandbox for this workspace. You can keep chatting. Use /sbx off to run tools on the host.
 
@@ -154,10 +154,10 @@ Extension-provided tools are not routed through SBX and run on the host by defau
 
 If no matching sandbox exists—or `sbx` cannot be discovered—routed tools and interactive `!` commands remain blocked. `!` commands use the same short readiness wait and never fall through to host execution. Explicit `/sbx off` enables normal host `!` commands.
 
-## Startup warnings
+## Startup notifications
 
 - **Host-provided packages in `dependencies` (`typebox`):** update `pi-sbx` to a version that declares these as `"*"` peer dependencies, then reload Pi.
-- **Waiting for a sandbox:** Pi is usable for conversation; routed tools are waiting for discovery/readiness. Use `/sbx off` if host execution is intended.
+- **Waiting for a sandbox (info):** Pi is usable for conversation; routed tools are waiting for discovery/readiness. Use `/sbx off` if host execution is intended.
 - **Discovery expired/failed:** tools remain blocked. Fix SBX access and use `/sbx` to check again, or explicitly choose host mode.
 - **Initialization failed:** inspect the image's startup configuration and private logs. A configured `SBX_STARTUP_DIR` requires `sandbox-startup` on the sandbox PATH. Fix/retry image initialization, then reconnect with `/sbx on`.
 - **`pi-mcp-adapter` replaces built-in `mcp`:** this is a Pi configuration conflict, not a `pi-sbx` error. Use `pi config` to keep only one MCP implementation enabled. If switching to built-in MCP, migrate and verify your server configuration before removing the adapter.

@@ -19,6 +19,7 @@ async function until(condition: () => boolean): Promise<void> {
 
 function fixture(t: test.TestContext, overrides: Partial<ConnectionOptions> = {}) {
 	const notifications: string[] = [];
+	const notificationTypes: Array<"info" | "warning"> = [];
 	const states: ConnectionState[] = [];
 	let disposed = 0;
 	let workerFailure!: (error: Error) => void;
@@ -26,12 +27,13 @@ function fixture(t: test.TestContext, overrides: Partial<ConnectionOptions> = {}
 	const connection = new SandboxConnection({
 		discover: async () => list,
 		createTransport: (_sandbox, _executable, _initializing, failure) => { workerFailure = failure; return transport; },
-		onChange: (state) => states.push(state), notify: (message) => notifications.push(message),
+		onChange: (state) => states.push(state),
+		notify: (message, type) => { notifications.push(message); notificationTypes.push(type); },
 		pollIntervalMs: 5, discoveryTimeoutMs: 200, toolWaitMs: 5,
 		...overrides,
 	});
 	t.after(() => connection.close());
-	return { connection, transport, notifications, states, disposed: () => disposed, fail: (error: Error) => workerFailure(error) };
+	return { connection, transport, notifications, notificationTypes, states, disposed: () => disposed, fail: (error: Error) => workerFailure(error) };
 }
 
 test("connects eagerly without awaiting startup or notifying on success", async (t) => {
@@ -43,7 +45,7 @@ test("connects eagerly without awaiting startup or notifying on success", async 
 	assert.deepEqual(f.states.map((state) => state.phase), ["waiting", "connecting", "ready"]);
 });
 
-test("polls non-overlapping discoveries and notifies only once before late success", async (t) => {
+test("polls non-overlapping discoveries and notifies only once as info before late success", async (t) => {
 	let calls = 0;
 	let active = 0;
 	const f = fixture(t, { discover: async () => {
@@ -57,6 +59,7 @@ test("polls non-overlapping discoveries and notifies only once before late succe
 	assert.equal(calls, 3);
 	assert.equal(f.notifications.length, 1);
 	assert.match(f.notifications[0]!, /Waiting for a sandbox.*\/sbx off/);
+	assert.deepEqual(f.notificationTypes, ["info"]);
 });
 
 test("discovery expiry remains fail-closed, with one terminal notification", async (t) => {
@@ -64,6 +67,7 @@ test("discovery expiry remains fail-closed, with one terminal notification", asy
 	f.connection.start();
 	await until(() => f.connection.state.phase === "failed");
 	assert.equal(f.notifications.length, 2);
+	assert.deepEqual(f.notificationTypes, ["info", "warning"]);
 	assert.match(f.notifications[1]!, /discovery deadline.*tools remain unavailable.*\/sbx off/);
 	await assert.rejects(f.connection.requireTransport(), /discovery deadline/);
 });
@@ -73,6 +77,7 @@ test("discovery errors never enable host execution", async (t) => {
 	f.connection.start();
 	await until(() => f.connection.state.phase === "failed");
 	assert.match(f.notifications[0]!, /daemon unavailable/);
+	assert.deepEqual(f.notificationTypes, ["warning"]);
 	await assert.rejects(f.connection.requireTransport(), /daemon unavailable/);
 });
 
@@ -176,6 +181,7 @@ test("startup rejection is notified once and never converted to host execution",
 	await until(() => f.connection.state.phase === "failed");
 	await assert.rejects(f.connection.requireTransport(), /initialization failed/);
 	assert.equal(f.notifications.length, 1);
+	assert.deepEqual(f.notificationTypes, ["warning"]);
 });
 
 test("a failure after the ready frame cannot be overwritten when connect resumes", async (t) => {

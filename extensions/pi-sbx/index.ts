@@ -358,7 +358,7 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 			if (state.phase === "ready") pi.appendEntry<SelectionState>(STATE_ENTRY, { name: state.sandbox!.name });
 			updateStatus();
 		},
-		notify: (message) => context?.ui.notify(message, "warning"),
+		notify: (message, type) => context?.ui.notify(message, type),
 	});
 
 	function restoredSelection(ctx: ExtensionContext): SelectionState | undefined {

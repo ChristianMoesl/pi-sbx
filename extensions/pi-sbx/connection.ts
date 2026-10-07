@@ -18,7 +18,7 @@ export interface ConnectionOptions {
 	discover(signal: AbortSignal, timeoutMs: number): Promise<SandboxList>;
 	createTransport(sandbox: SbxSandbox, executable: string, onInitializing: () => void, onFailure: (error: Error) => void): SbxTransport;
 	onChange(state: ConnectionState): void;
-	notify(message: string): void;
+	notify(message: string, type: "info" | "warning"): void;
 	discoveryTimeoutMs?: number;
 	pollIntervalMs?: number;
 	toolWaitMs?: number;
@@ -105,7 +105,7 @@ export class SandboxConnection {
 			}
 			if (!notifiedWaiting) {
 				notifiedWaiting = true;
-				this.options.notify("Waiting for a sandbox for this workspace. You can keep chatting. Use /sbx off to run tools on the host.");
+				this.options.notify("Waiting for a sandbox for this workspace. You can keep chatting. Use /sbx off to run tools on the host.", "info");
 			}
 			await delay(Math.min(this.options.pollIntervalMs ?? 1_000, Math.max(0, deadline - Date.now())), undefined, { signal });
 		}
@@ -115,7 +115,7 @@ export class SandboxConnection {
 		if (this.state.phase === "failed") return;
 		const error = `${message} Sandbox tools remain unavailable. ${RECOVERY}`;
 		this.update({ ...this.state, phase: "failed", error });
-		this.options.notify(error);
+		this.options.notify(error, "warning");
 	}
 
 	private cancel(): void {

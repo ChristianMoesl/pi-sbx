@@ -27,6 +27,7 @@ afterEach(async () => {
 interface Harness {
 	commands: Map<string, any>;
 	notifications: string[];
+	notificationTypes: Array<"info" | "warning" | "error" | undefined>;
 	statuses: string[];
 	entries: any[];
 	tools: Map<string, RegisteredTool>;
@@ -42,6 +43,7 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 		? [{ type: "custom", customType: "pi-sbx-selection", data: { hostDisabled: true } }] : []);
 	const commands = new Map<string, any>();
 	const notifications: string[] = [];
+	const notificationTypes: Harness["notificationTypes"] = [];
 	const statuses: string[] = [];
 	const tools = new Map<string, RegisteredTool>();
 	const handlers = new Map<string, Handler[]>();
@@ -60,7 +62,10 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 				fg: (_color: string, text: string) => text,
 			},
 			setStatus: (_key: string, text: string) => statuses.push(text),
-			notify: (message: string) => notifications.push(message),
+			notify: (message: string, type?: "info" | "warning" | "error") => {
+				notifications.push(message);
+				notificationTypes.push(type);
+			},
 			select: async () => undefined,
 			confirm: async (title: string, message: string) => {
 				confirmations.push({ title, message });
@@ -104,7 +109,7 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 	});
 
 	const harness: Harness = {
-		commands, notifications, statuses, entries,
+		commands, notifications, notificationTypes, statuses, entries,
 		tools,
 		handlers,
 		context,
@@ -376,6 +381,7 @@ test("missing sandbox blocks every routed tool and user bash, not explicit appro
 	await startHarness(harness);
 	assert.equal(harness.notifications.length, 1);
 	assert.match(harness.notifications[0]!, /Waiting for a sandbox.*\/sbx off/);
+	assert.deepEqual(harness.notificationTypes, ["info"]);
 	const calls = {
 		bash: { command: "printf unsafe" }, read: { path: "README.md" },
 		write: { path: "/never-write-this", content: "unsafe" },
