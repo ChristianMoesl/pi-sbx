@@ -38,7 +38,7 @@ interface Harness {
 	emit(eventName: string, event: any): Promise<any[]>;
 }
 
-function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTools?: string[]; host?: boolean; entries?: any[] } = {}): Harness {
+function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; hasUI?: boolean; activeTools?: string[]; host?: boolean; entries?: any[] } = {}): Harness {
 	const entries: any[] = options.entries ?? (options.host
 		? [{ type: "custom", customType: "pi-sbx-selection", data: { hostDisabled: true } }] : []);
 	const commands = new Map<string, any>();
@@ -90,7 +90,7 @@ function createHarness(options: { sandbox?: boolean; hasUI?: boolean; activeTool
 			code: 0,
 			stdout: JSON.stringify({
 				sandboxes: sandbox
-					? [{ name: "test-sandbox", status: "running", workspaces: [process.cwd()] }]
+					? (options.sandboxNames ?? ["test-sandbox"]).map((name) => ({ name, status: "running", workspaces: [process.cwd()] }))
 					: [],
 			}),
 			stderr: "",
@@ -441,4 +441,36 @@ test("sbx off cancels waiting without waiting for the agent to become idle", asy
 	(harness.context as any).waitForIdle = () => { throw new Error("must not await agent idleness"); };
 	await harness.commands.get("sbx").handler("off", harness.context);
 	assert.equal(harness.statuses.at(-1), "sbx: host (disabled)");
+});
+
+test("sbx lists sandboxes before host and maps every menu choice to the correct environment", async () => {
+	for (const index of [0, 1, 2]) {
+		const harness = createHarness({ host: true, sandboxNames: ["beta", "alpha"] });
+		await startHarness(harness);
+		harness.context.ui.select = async (title, labels) => {
+			assert.equal(title, "Tool execution environment");
+			assert.deepEqual(labels, ["alpha (running)", "beta (running)", "Host (disable sandboxing)"]);
+			return labels[index];
+		};
+		await harness.commands.get("sbx").handler("", harness.context);
+		if (index === 2) {
+			assert.deepEqual(harness.entries.at(-1).data, { hostDisabled: true });
+			assert.equal(harness.statuses.at(-1), "sbx: host (disabled)");
+		} else {
+			assert.equal(harness.entries.at(-1).data.name, index === 0 ? "alpha" : "beta");
+			assert.notEqual(harness.statuses.at(-1), "sbx: host (disabled)");
+		}
+	}
+});
+
+test("sbx preserves the selected marker and leaves selection unchanged when the menu is dismissed", async () => {
+	const harness = createHarness();
+	await startHarness(harness);
+	harness.context.ui.select = async (_title, labels) => {
+		assert.deepEqual(labels, ["test-sandbox (running) • selected", "Host (disable sandboxing)"]);
+		return undefined;
+	};
+	await harness.commands.get("sbx").handler("", harness.context);
+	assert.ok(!harness.entries.some((entry) => entry.data?.hostDisabled === true));
+	assert.notEqual(harness.statuses.at(-1), "sbx: host (disabled)");
 });

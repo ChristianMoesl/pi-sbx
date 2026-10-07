@@ -663,17 +663,17 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 				return;
 			}
 			const hostLabel = "Host (disable sandboxing)";
-			const labels = [hostLabel, ...list.sandboxes.map((sandbox) => {
+			const labels = [...list.sandboxes.map((sandbox) => {
 				const selected = connection.state.phase !== "host" && sandbox.name === selectedName ? " • selected" : "";
 				return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
-			})];
+			}), hostLabel];
 			const choice = await ctx.ui.select("Tool execution environment", labels);
 			if (controller.signal.aborted || !choice) return;
 			if (choice === hostLabel) {
 				useHostFallback(ctx);
 				return;
 			}
-			const sandbox = list.sandboxes[labels.indexOf(choice) - 1];
+			const sandbox = list.sandboxes[labels.indexOf(choice)];
 			if (sandbox) startSandbox(sandbox.name, list);
 		},
 	});
