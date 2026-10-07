@@ -1,6 +1,6 @@
 {
   "name": "@christianmoesl/pi-sbx",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "packageManager": "pnpm@12.4.2",
   "description": "Run Pi coding-agent tool calls inside Docker sbx sandboxes",
   "type": "module",
