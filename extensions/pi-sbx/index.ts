@@ -642,8 +642,8 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 				ctx.ui.notify("Usage: /sbx, /sbx on, or /sbx off", "warning");
 				return;
 			}
-			await ctx.waitForIdle();
-			if (controller.signal.aborted) return;
+			// Commands must remain usable during an agent turn. Connection changes
+			// dispose the old worker and reject its calls; never wait for agent idleness.
 			if (action === "on") {
 				startSandbox(selectedName);
 				return;
@@ -667,7 +667,7 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 				const selected = connection.state.phase !== "host" && sandbox.name === selectedName ? " • selected" : "";
 				return `${sandbox.name} (${sandbox.status ?? "unknown"})${selected}`;
 			}), hostLabel];
-			const choice = await ctx.ui.select("Tool execution environment", labels);
+			const choice = await ctx.ui.select("Tool execution environment", labels, { signal: controller.signal });
 			if (controller.signal.aborted || !choice) return;
 			if (choice === hostLabel) {
 				useHostFallback(ctx);

@@ -5,7 +5,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { spawn } from "node:child_process";
 import { SBX_WORKER_SCRIPT, SbxTransport } from "../extensions/pi-sbx/transport.ts";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import piSbxExtension, {
 	hostApprovalMessage,
 	withoutExecutionTarget,
@@ -13,7 +13,7 @@ import piSbxExtension, {
 
 const ROUTED_TOOLS = ["bash", "edit", "find", "grep", "ls", "read", "write"] as const;
 
-type Handler = (event: any, ctx: ExtensionContext) => any;
+type Handler = (event: any, ctx: ExtensionCommandContext) => any;
 type RegisteredTool = {
 	parameters: { required?: string[]; properties: Record<string, any> };
 	execute: (...args: any[]) => Promise<any>;
@@ -32,7 +32,7 @@ interface Harness {
 	entries: any[];
 	tools: Map<string, RegisteredTool>;
 	handlers: Map<string, Handler[]>;
-	context: ExtensionContext;
+	context: ExtensionCommandContext;
 	confirmations: Array<{ title: string; message: string }>;
 	setApproval(approved: boolean): void;
 	emit(eventName: string, event: any): Promise<any[]>;
@@ -56,7 +56,9 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 		mode: options.hasUI === false ? "print" : "tui",
 		cwd: process.cwd(),
 		sessionManager: { getBranch: () => entries },
-		waitForIdle: async () => {},
+		isIdle: () => false,
+		waitForIdle: async () => { throw new Error("/sbx must not wait for agent idleness"); },
+		abort: () => { throw new Error("/sbx must not abort the agent turn"); },
 		ui: {
 			theme: {
 				fg: (_color: string, text: string) => text,
@@ -72,7 +74,7 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 				return approved;
 			},
 		},
-	} as unknown as ExtensionContext;
+	} as unknown as ExtensionCommandContext;
 
 	const pi = {
 		registerTool(tool: RegisteredTool) {
@@ -473,4 +475,100 @@ test("sbx preserves the selected marker and leaves selection unchanged when the 
 	await harness.commands.get("sbx").handler("", harness.context);
 	assert.ok(!harness.entries.some((entry) => entry.data?.hostDisabled === true));
 	assert.notEqual(harness.statuses.at(-1), "sbx: host (disabled)");
+});
+
+async function waitForSandbox(harness: Harness, name = "test-sandbox"): Promise<void> {
+	for (let attempt = 0; harness.statuses.at(-1) !== `sbx: ${name}` && attempt < 400; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.equal(harness.statuses.at(-1), `sbx: ${name}`);
+}
+
+async function startRunningBash(harness: Harness, signal: AbortSignal) {
+	const started = Promise.withResolvers<void>();
+	let settled = false;
+	const result = harness.tools.get("bash")!.execute("running", { command: "printf running; sleep 30" }, signal,
+		(update: { content: Array<{ type: string; text?: string }> }) => {
+			if (update.content.some((item) => item.type === "text" && item.text?.includes("running"))) started.resolve();
+		}).then(
+		(value) => { settled = true; return { value, error: undefined }; },
+		(error: Error) => { settled = true; return { value: undefined, error }; },
+	);
+	await started.promise;
+	return { result, settled: () => settled };
+}
+
+test("sbx opens and dismisses its menu while a sandbox tool is still running", { timeout: 5_000 }, async (t) => {
+	const harness = createHarness();
+	await startHarness(harness);
+	await waitForSandbox(harness);
+	const controller = new AbortController();
+	t.after(() => controller.abort());
+	const running = await startRunningBash(harness, controller.signal);
+	let shown = false;
+	harness.context.ui.select = async () => {
+		shown = true;
+		assert.equal(running.settled(), false);
+		return undefined;
+	};
+	await harness.commands.get("sbx").handler("", harness.context);
+	assert.equal(shown, true);
+	assert.equal(running.settled(), false, "browsing must not close the worker");
+	controller.abort();
+	await running.result;
+});
+
+test("sbx selection, on, and off take effect during a running tool without replay", { timeout: 10_000 }, async (t) => {
+	for (const action of ["", "on", "off"]) {
+		const harness = createHarness({ sandboxNames: ["alpha", "beta"] });
+		await startHarness(harness);
+		await waitForSandbox(harness, "alpha");
+		const controller = new AbortController();
+		t.after(() => controller.abort());
+		const running = await startRunningBash(harness, controller.signal);
+		harness.context.ui.select = async (_title, labels) => labels[1];
+		await harness.commands.get("sbx").handler(action, harness.context);
+		const result = await running.result;
+		assert.match(result.error?.message ?? "", /was closed/);
+		assert.equal(controller.signal.aborted, false, "do not abort the agent's turn signal");
+		if (action === "off") {
+			assert.equal(harness.statuses.at(-1), "sbx: host (disabled)");
+		} else {
+			await waitForSandbox(harness, action === "on" ? "alpha" : "beta");
+		}
+		const next = await harness.tools.get("bash")!.execute("next", { command: "printf usable" });
+		assert.equal(next.content[0].text, "usable");
+	}
+});
+
+test("new commands and session changes dismiss a pending sbx menu and ignore its stale answer", async () => {
+	for (const action of ["off", "on", "menu", "shutdown", "session-start"]) {
+		const harness = createHarness({ host: true });
+		await startHarness(harness);
+		const shown = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<string | undefined>();
+		let menuSignal: AbortSignal | undefined;
+		harness.context.ui.select = async (_title, _labels, options) => {
+			menuSignal = options?.signal;
+			shown.resolve();
+			return answer.promise;
+		};
+		const command = harness.commands.get("sbx").handler("", harness.context);
+		await shown.promise;
+		assert.ok(menuSignal, "pass the command's cancellation signal to the UI");
+		assert.equal(menuSignal.aborted, false);
+		harness.context.ui.select = async () => undefined;
+		if (action === "shutdown") await harness.emit("session_shutdown", {});
+		else if (action === "session-start") await startHarness(harness);
+		else await harness.commands.get("sbx").handler(action === "menu" ? "" : action, harness.context);
+		assert.equal(menuSignal.aborted, true);
+		if (action === "on") await waitForSandbox(harness);
+		const entries = harness.entries.length;
+		const status = harness.statuses.at(-1);
+		// Even if a UI implementation returns a choice after cancellation, ignore it.
+		answer.resolve(action === "on" ? "Host (disable sandboxing)" : "test-sandbox (running)");
+		await command;
+		assert.equal(harness.entries.length, entries);
+		assert.equal(harness.statuses.at(-1), status);
+	}
 });

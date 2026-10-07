@@ -102,6 +102,14 @@ sbx: my-workspace
 
 Run `/sbx` to refresh discovery and select a sandbox. With no matching sandbox and sandboxing enabled, this restarts background discovery. Select **Host (disable sandboxing)** in that menu, or run `/sbx off`, to disable sandboxing for the current session. Run `/sbx on` to reconnect to the previously selected sandbox, or discover one if none was selected.
 
+### Using `/sbx` during an agent turn
+
+`/sbx`, `/sbx on`, and `/sbx off` work while the agent is thinking or executing tools; they do not wait for the turn to finish or abort the agent turn. The menu appears after sandbox discovery, with **Host (disable sandboxing)** last. Opening or dismissing the menu leaves the current execution environment unchanged.
+
+Selecting an environment or running `/sbx on` or `/sbx off` takes effect immediately. This closes the previous sandbox worker: in-flight sandbox calls fail, may have partially executed, and are **never replayed or moved to the host**. Subsequent calls use the new environment and its normal readiness checks. Already-running host calls are not cancelled or moved into a sandbox.
+
+A newer `/sbx` command or a session change cancels an older discovery/menu interaction, so a stale selection cannot override it.
+
 ### Starting before a sandbox exists
 
 Pi starts without waiting for discovery or image initialization. pi-sbx checks immediately and, if no matching sandbox exists, polls roughly once per second for up to one minute. It emits one informational notification (not a warning):
