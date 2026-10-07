@@ -7,6 +7,9 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
 const KILL_GRACE_MS = 1_000;
 
+/** A lost worker/CLI connection, not an image-readiness or protocol failure. */
+export class SbxConnectionError extends Error {}
+
 export interface SbxExecResult {
 	stdout: Buffer;
 	stderr: Buffer;
@@ -248,21 +251,22 @@ export class SbxTransport {
 			const child = this.spawnWorker(this.sandbox, this.workerCwd, this.executable);
 			this.child = child;
 			this.startupTimer = setTimeout(() => {
-				this.handleExit(child, new Error(`Timed out starting sbx transport for ${this.sandbox}`));
+				this.handleExit(child, new SbxConnectionError(`Timed out starting sbx transport for ${this.sandbox}`));
 			}, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-			child.stdout.on("data", (data: Buffer) => this.handleStdout(data));
+			child.stdout.on("data", (data: Buffer) => { if (this.child === child) this.handleStdout(data); });
 			child.stderr.on("data", (data: Buffer) => {
 				this.stderrPending += data.toString();
 			});
-			child.on("error", (error) => this.handleExit(child, asError(error)));
+			child.stdin.on("error", (error) => this.handleExit(child, new SbxConnectionError(error.message)));
+			child.on("error", (error) => this.handleExit(child, new SbxConnectionError(error.message)));
 			child.on("close", (exitCode) => {
 				const detail = this.filteredTransportStderr();
 				const suffix = detail ? `: ${detail}` : "";
-				this.handleExit(child, new Error(`sbx transport for ${this.sandbox} exited with code ${exitCode}${suffix}`));
+				this.handleExit(child, new SbxConnectionError(`sbx transport for ${this.sandbox} exited with code ${exitCode}${suffix}`));
 			});
 		} catch (error) {
 			this.child = undefined;
-			this.failStart(asError(error));
+			this.failStart(new SbxConnectionError(asError(error).message));
 			this.startPromise = undefined;
 		}
 
@@ -289,6 +293,7 @@ export class SbxTransport {
 				return;
 			}
 			this.handleMessage(message);
+			if (!this.child) return;
 		}
 	}
 

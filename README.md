@@ -42,12 +42,12 @@ pi install /absolute/path/to/pi-sbx
 
 ## Create a sandbox
 
-The Pi agent directory does not need to be mounted. A minimal sandbox can be created with:
+The Pi agent directory does not need to be mounted. Replace `your-sandbox-image:tag` with a Linux image meeting the requirements above, then create a sandbox:
 
 ```sh
 sbx create \
   --name my-workspace \
-  --template christianmoesl/radar-sandbox:latest \
+  --template your-sandbox-image:tag \
   shell "$PWD"
 ```
 
@@ -73,7 +73,7 @@ Create a sandbox from your WSL project directory, converting the **host workspac
 ```sh
 sbx.exe create \
   --name my-workspace \
-  --template christianmoesl/radar-sandbox:latest \
+  --template your-sandbox-image:tag \
   shell "$(wslpath -w "$PWD")"
 pi
 ```
@@ -116,6 +116,18 @@ A routed tool requested before readiness waits at most about **two seconds** for
 
 **Behavior change:** previous versions automatically fell back to host tools on missing SBX or discovery failure. They also sometimes persisted that fallback, so an old `hostFallback` session entry is not proof of user consent. Those old host-mode entries are no longer restored: use `/sbx off` once after upgrading if host execution is intended. New explicit host choices are persisted and restored normally; saved sandbox names and conversation history are unchanged.
 
+### Sandbox restarts and replacement
+
+Changing workspace mounts can require removing and recreating a sandbox under the **same name**. This terminates pi-sbx's worker even though Pi itself stays open on the host.
+
+After a previously ready worker loses its connection, pi-sbx automatically rediscovers that same sandbox and creates a fresh worker with the current mount mappings. A new 60-second discovery/retry window tolerates the sandbox being temporarily absent, discovery errors, and races between discovery and `sbx exec`. Each worker connection and image readiness check retains its normal timeout; a connection begun within the retry window can finish afterward. Image-readiness and protocol failures remain terminal rather than being retried automatically.
+
+The footer shows reconnection progress, with one informational disconnect notice and no success notification. If recovery expires or initialization fails, one actionable warning is shown. Use `/sbx on` to retry or `/sbx` to select another sandbox. `/sbx off`, selection, reload/session replacement, and shutdown cancel recovery.
+
+**Interrupted calls fail and are never replayed.** They may already have made partial changes; inspect the result before retrying a mutation. Calls made while reconnecting use the normal short readiness wait. Recovery never chooses a different sandbox name or enables host execution.
+
+For versions without automatic reconnection, run **`/sbx on` after the replacement sandbox is ready** to reconnect without restarting Pi. Reload Pi separately when needed to refresh repository instructions and skills.
+
 ### Optional image startup readiness
 
 An image can opt in by setting a nonempty `SBX_STARTUP_DIR` **inside the sandbox** and providing this executable on its sandbox `PATH`:
@@ -126,7 +138,7 @@ sandbox-startup wait --timeout 60
 
 The pi-sbx worker runs that command before reporting ready. Exit zero enables sandbox tools; a missing helper, failure, or timeout keeps them unavailable. With an unset/empty variable, the worker uses normal transport readiness without invoking the helper. Pi-sbx does not execute the directory's scripts or interpret the helper's private status files.
 
-See **[the image readiness contract](docs/readiness.md)** for lifecycle guarantees, image/kit setup, timeout and cancellation semantics, diagnostics, and conformance checks. The contract is independent of Radar or any workspace launcher.
+See **[the image readiness contract](docs/readiness.md)** for lifecycle guarantees, image/kit setup, timeout and cancellation semantics, diagnostics, and conformance checks. The contract is independent of any workspace launcher.
 
 The extension routes these built-in tools through `sbx exec`:
 
@@ -213,7 +225,7 @@ PI_SBX_TEST_WORKSPACE=/path/to/workspace \
   node --experimental-strip-types --import ./test/setup.ts --test test/sbx-integration.test.ts
 ```
 
-The unit suite uses local fixture workers and fake discovery, including delayed startup, failure, cancellation, and host-mode races; it never creates real sandboxes.
+The unit suite uses local fixture workers and fake discovery, including delayed startup, failure, cancellation, host-mode races, sandbox replacement, and worker loss during a mutation (without replay); it never creates real sandboxes.
 
 The optional integration test waits for worker/image readiness, then creates and removes a unique temporary subdirectory in that workspace. It does not create or remove sandboxes. Without this variable, the integration test is skipped.
 

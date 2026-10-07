@@ -2,7 +2,7 @@
 
 pi-sbx keeps Pi on the host and establishes a tool worker through `sbx exec`. A sandbox appearing in `sbx ls` is discovery, not proof that its initialization has finished. The worker's `ready` message is the final execution gate.
 
-Images can opt into an additional initialization barrier using `SBX_STARTUP_DIR` and `sandbox-startup wait`. This is an **image capability**, independent of Radar, a particular launcher, or the layout of an image's private status files. pi-sbx never creates sandboxes or runs startup hooks.
+Images can opt into an additional initialization barrier using `SBX_STARTUP_DIR` and `sandbox-startup wait`. This is an **image capability**, independent of any launcher or the layout of an image's private status files. pi-sbx never creates sandboxes or runs startup hooks.
 
 ## Contract at a glance
 
@@ -69,7 +69,7 @@ setup:
 
 Here `|| true` keeps the sandbox accessible after a hook failure; the generic runner records that failure and `wait` still returns nonzero. Do not use this pattern with a helper that does not preserve failures.
 
-No pi-sbx-specific flag or Radar setting is required. Start Pi with pi-sbx enabled before or after the sandbox is created. A launcher may independently run the same `wait` command before its own setup tasks.
+No pi-sbx-specific flag or launcher setting is required. Start Pi with pi-sbx enabled before or after the sandbox is created. A launcher may independently run the same `wait` command before its own setup tasks.
 
 ## Waiting is not a fixed delay
 
@@ -84,6 +84,8 @@ These bounds serve different purposes:
 
 Discovery and initialization are separate phases, so their maximum durations can add up. They happen in the background and do not delay opening Pi or chatting. Tools become available as soon as readiness succeeds, even if that takes only milliseconds.
 
+After a ready worker loses its connection, pi-sbx starts a new 60-second rediscovery/retry window for the same sandbox name. It refreshes mount mappings and repeats readiness on a new worker. During recovery, transient discovery and worker-connection failures are retried within that window; initialization and protocol failures remain terminal. A worker connection started within the window retains its normal startup and readiness timeouts, so it may finish after the window ends. Interrupted calls fail without replay and may have partially executed. No different sandbox is selected automatically.
+
 A call whose short wait expires returns an actionable failure and is **never replayed**. The shared background connection continues, so a later call can succeed. Cancelling a tool's wait does not cancel readiness for other calls.
 
 `/sbx off`, manual sandbox selection, session replacement, and shutdown cancel the previous attempt. Late results cannot override the user's choice or attach to the next session. The worker and readiness observer are disposed; independently running image hooks are not automatically stopped or rerun. Only explicit host mode permits ordinary host execution. Per-call `execution_target: "host"` remains approval-gated even while no sandbox is selected.
@@ -91,9 +93,9 @@ A call whose short wait expires returns an actionable failure and is **never rep
 ## User-visible behavior
 
 - One notification after the initial lookup finds no matching sandbox, explaining that conversation remains available and `/sbx off` enables host execution.
-- Footer-only progress for connecting and initializing.
+- One informational notice on connection loss, followed by footer progress while reconnecting. Initial connecting and initializing progress is footer-only.
 - The normal sandbox-name footer when ready. **No success notification or injected user message.**
-- One actionable warning for discovery expiry/error, worker connection loss, or initialization failure. Repeated polls and blocked tool calls do not generate repeated notifications.
+- One actionable warning for initial discovery expiry/error, exhausted reconnection, or initialization/protocol failure. Repeated polls and blocked tool calls do not generate repeated notifications.
 - `/sbx` checks again and offers selection; `/sbx on` reconnects to the saved sandbox. Neither command automatically reruns failed image hooks.
 
 Helper stdout and stderr are discarded. Notifications contain a safe failure category, not hook output, environment values, or contents of private logs. Inspect those logs explicitly through the image's documented diagnostics and fix/retry initialization before reconnecting.
@@ -104,7 +106,7 @@ This barrier covers **required initialization declared by the image's helper**. 
 
 Keep required initialization small where possible. A long mandatory hook necessarily delays sandbox tools; readiness must not be bypassed simply to improve a timing metric. Do not remove existing startup capabilities or relabel unfinished mandatory work as ready. Separate optional work only through an intentional image-design change.
 
-A worker connection is not reused across manual selection or session replacement. A disconnected worker cannot authorize host execution. Reconnection establishes a new worker and repeats the image check; stale success must be rejected by the helper's current-boot validation.
+A worker connection is not reused across reconnection, manual selection, or session replacement. A disconnected worker cannot authorize host execution. Reconnection establishes a new worker and repeats the image check; stale success must be rejected by the helper's current-boot validation.
 
 ## Conformance checklist
 
@@ -118,4 +120,4 @@ Image authors should verify:
 - Multiple observers do not rerun hooks or corrupt state.
 - Timeout and cancellation terminate observation without replaying initialization.
 
-pi-sbx's local fixture tests cover transport gating, helper invocation, failures, timeouts, early requests, and cancellation. Current-boot state and hook execution semantics remain the image runner's own test responsibility.
+pi-sbx's local fixture tests cover transport gating, helper invocation, failures, timeouts, early requests, cancellation, same-name sandbox replacement, and interrupted mutations without replay. Current-boot state and hook execution semantics remain the image runner's own test responsibility.

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SandboxConnection, type ConnectionOptions, type ConnectionState, type SandboxList } from "../extensions/pi-sbx/connection.ts";
-import type { SbxTransport } from "../extensions/pi-sbx/transport.ts";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { SBX_WORKER_SCRIPT, SbxConnectionError, SbxTransport } from "../extensions/pi-sbx/transport.ts";
 
 const sandbox = { name: "example", id: "instance-1", workspaces: ["/work"], mounts: [] };
 const list: SandboxList = { executable: "sbx", sandboxes: [sandbox] };
@@ -195,4 +199,164 @@ test("a failure after the ready frame cannot be overwritten when connect resumes
 	await assert.rejects(f.connection.requireTransport(), /protocol failed/);
 	assert.ok(!f.states.some((state) => state.phase === "ready"));
 	assert.equal(f.notifications.length, 1);
+});
+
+test("worker loss rediscovers the same sandbox with fresh mounts and rechecks readiness", async (t) => {
+	const startup = deferred();
+	const replacement = { ...sandbox, id: "instance-2", mounts: [{ hostPath: "/new", sandboxPath: "/new" }] };
+	const failures: Array<(error: Error) => void> = [];
+	let discoveries = 0;
+	let transports = 0;
+	let disposed = 0;
+	const f = fixture(t, {
+		discover: async () => {
+			discoveries++;
+			if (discoveries === 1) return list;
+			if (discoveries === 2) throw new Error("daemon restarting");
+			if (discoveries === 3) return { ...list, sandboxes: [{ ...sandbox, name: "another" }] };
+			return { executable: "new-sbx", sandboxes: [replacement] };
+		},
+		createTransport: (found, executable, initializing, failure) => {
+			failures.push(failure);
+			const attempt = ++transports;
+			if (attempt === 2) { assert.equal(found, replacement); assert.equal(executable, "new-sbx"); }
+			return {
+				connect: async () => { if (attempt === 2) { initializing(); await startup.promise; } },
+				dispose: () => { disposed++; },
+			} as unknown as SbxTransport;
+		},
+	});
+	f.connection.start();
+	await until(() => f.connection.state.phase === "ready");
+	failures[0]!(new SbxConnectionError("worker exited with code 137"));
+	assert.equal(f.connection.state.phase, "reconnecting");
+	await until(() => f.connection.state.phase === "initializing");
+	await assert.rejects(f.connection.requireTransport(), /not ready/);
+	failures[0]!(new SbxConnectionError("late close from old worker"));
+	assert.equal(f.connection.state.phase, "initializing");
+	startup.resolve();
+	await until(() => f.connection.state.phase === "ready");
+	assert.equal(f.connection.state.sandbox, replacement);
+	assert.equal(disposed, 1);
+	assert.equal(transports, 2);
+	assert.equal(discoveries, 4);
+	assert.deepEqual(f.notificationTypes, ["info"]);
+	assert.match(f.notifications[0]!, /reconnecting.*not replayed.*partially executed/);
+});
+
+test("reconnection retries a stale discovery/exec race without looping on readiness errors", async (t) => {
+	let attempts = 0;
+	let lost!: (error: Error) => void;
+	const f = fixture(t, { createTransport: (_sandbox, _executable, initializing, failure) => {
+		const attempt = ++attempts;
+		lost = failure;
+		return {
+			connect: async () => {
+				if (attempt === 2) throw new SbxConnectionError("sandbox disappeared before exec");
+				if (attempt === 3) { initializing(); const error = new Error("Startup initialization failed"); failure(error); throw error; }
+			}, dispose() {},
+		} as unknown as SbxTransport;
+	} });
+	f.connection.start();
+	await until(() => f.connection.state.phase === "ready");
+	lost(new SbxConnectionError("removed"));
+	await until(() => f.connection.state.phase === "failed");
+	assert.equal(attempts, 3);
+	await assert.rejects(f.connection.requireTransport(), /Startup initialization failed/);
+	assert.deepEqual(f.notificationTypes, ["info", "warning"]);
+});
+
+test("reconnection expires with one warning and never changes the selected name", async (t) => {
+	let available = true;
+	const f = fixture(t, {
+		discoveryTimeoutMs: 30,
+		discover: async () => available ? list : { ...list, sandboxes: [{ ...sandbox, name: "other" }] },
+	});
+	f.connection.start();
+	await until(() => f.connection.state.phase === "ready");
+	available = false;
+	f.fail(new SbxConnectionError("removed"));
+	await until(() => f.connection.state.phase === "failed");
+	await assert.rejects(f.connection.requireTransport(), /Could not reconnect.*example.*deadline/);
+	assert.deepEqual(f.notificationTypes, ["info", "warning"]);
+	assert.ok(f.states.every((state) => !state.sandbox || state.sandbox.name === sandbox.name));
+});
+
+test("repeated connection failures share one bounded recovery deadline", async (t) => {
+	let attempts = 0;
+	let lost!: (error: Error) => void;
+	const f = fixture(t, {
+		discoveryTimeoutMs: 35,
+		createTransport: (_sandbox, _executable, _initializing, failure) => {
+			const attempt = ++attempts;
+			lost = failure;
+			return { connect: async () => { if (attempt > 1) throw new SbxConnectionError("still unavailable"); }, dispose() {} } as unknown as SbxTransport;
+		},
+	});
+	f.connection.start();
+	await until(() => f.connection.state.phase === "ready");
+	lost(new SbxConnectionError("removed"));
+	await until(() => f.connection.state.phase === "failed");
+	assert.ok(attempts > 2);
+	await assert.rejects(f.connection.requireTransport(), /deadline.*still unavailable/);
+	assert.deepEqual(f.notificationTypes, ["info", "warning"]);
+});
+
+test("host mode, shutdown, and manual selection cancel background reconnection", async (t) => {
+	for (const action of ["host", "close", "select"] as const) {
+		const discovery = deferred();
+		let calls = 0;
+		let reconnectSignal!: AbortSignal;
+		const f = fixture(t, { discover: async (signal) => {
+			if (++calls === 2) { reconnectSignal = signal; await discovery.promise; }
+			return calls > 2 ? { ...list, sandboxes: [{ ...sandbox, name: "selected" }] } : list;
+		} });
+		f.connection.start();
+		await until(() => f.connection.state.phase === "ready");
+		f.fail(new SbxConnectionError("removed"));
+		const waitingCall = f.connection.requireTransport();
+		if (action === "select") f.connection.start("selected");
+		else f.connection[action]();
+		assert.ok(reconnectSignal.aborted);
+		discovery.resolve();
+		await assert.rejects(waitingCall, /environment changed/);
+		if (action === "select") {
+			await until(() => f.connection.state.phase === "ready");
+			assert.equal(f.connection.state.sandbox?.name, "selected");
+		} else assert.equal(f.connection.state.phase, action === "close" ? "closed" : "host");
+		assert.deepEqual(f.notificationTypes, ["info"]);
+	}
+});
+
+test("a killed worker rejects an in-flight mutation, reconnects, and never replays it", async (t) => {
+	const directory = await mkdtemp(path.join(tmpdir(), "pi-sbx-reconnect-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const journal = path.join(directory, "executions");
+	let workers = 0;
+	const f = fixture(t, {
+		discoveryTimeoutMs: 2_000,
+		createTransport: (sandbox, _executable, onInitializing, onFailure) => new SbxTransport(sandbox.name, directory, {
+			onInitializing, onFailure,
+			spawnWorker: () => {
+				workers++;
+				return spawn(process.execPath, ["-e", SBX_WORKER_SCRIPT], {
+					env: { ...process.env, SBX_STARTUP_DIR: "" }, detached: true, stdio: ["pipe", "pipe", "pipe"],
+				});
+			},
+		}),
+	});
+	f.connection.start();
+	await until(() => f.connection.state.phase === "ready");
+	const old = (await f.connection.requireTransport())!;
+	await assert.rejects(old.execute(directory, [process.execPath, "-e",
+		`require('node:fs').appendFileSync(${JSON.stringify(journal)}, 'executed\\n'); process.kill(process.ppid, 'SIGKILL');`,
+	]), SbxConnectionError);
+	await until(() => f.connection.state.phase === "ready");
+	const replacement = (await f.connection.requireTransport())!;
+	assert.notEqual(replacement, old);
+	await assert.rejects(old.execute(directory, ["printf", "stale"]), /closed/);
+	assert.equal((await replacement.execute(directory, ["printf", "usable"])).stdout.toString(), "usable");
+	assert.equal(await readFile(journal, "utf8"), "executed\n");
+	assert.equal(workers, 2);
+	assert.deepEqual(f.notificationTypes, ["info"]);
 });

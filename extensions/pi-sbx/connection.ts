@@ -1,13 +1,13 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { SbxSandbox } from "./discovery.ts";
-import { SbxTransport, waitForConnection } from "./transport.ts";
+import { SbxConnectionError, SbxTransport, waitForConnection } from "./transport.ts";
 
 export interface SandboxList {
 	executable: string;
 	sandboxes: SbxSandbox[];
 }
 
-export type ConnectionPhase = "waiting" | "connecting" | "initializing" | "ready" | "failed" | "host" | "closed";
+export type ConnectionPhase = "waiting" | "reconnecting" | "connecting" | "initializing" | "ready" | "failed" | "host" | "closed";
 export interface ConnectionState {
 	phase: ConnectionPhase;
 	sandbox?: SbxSandbox;
@@ -39,11 +39,18 @@ export class SandboxConnection {
 	}
 
 	start(preferredName?: string, selection?: SandboxList): void {
+		this.begin(preferredName, selection);
+	}
+
+	private begin(preferredName?: string, selection?: SandboxList, reconnecting?: SbxSandbox): void {
 		this.cancel();
 		const controller = this.controller;
-		this.update({ phase: "waiting" });
-		// Neither session_start nor a command waits for this operation.
-		this.pending = this.prepare(controller.signal, preferredName, selection).catch((error: unknown) => {
+		this.update(reconnecting ? { phase: "reconnecting", sandbox: reconnecting } : { phase: "waiting" });
+		if (reconnecting) {
+			this.options.notify(`Sandbox ${reconnecting.name} disconnected; reconnecting. Interrupted tools are not replayed and may have partially executed.`, "info");
+		}
+		// Neither session_start, a command, nor worker loss waits for this operation.
+		this.pending = this.prepare(controller.signal, preferredName, selection, reconnecting).catch((error: unknown) => {
 			if (controller.signal.aborted) return;
 			this.fail(error instanceof Error ? error.message : String(error));
 		});
@@ -77,32 +84,60 @@ export class SandboxConnection {
 		throw new Error(this.state.error ?? `Sandbox not ready (${this.state.phase}); this tool was not executed. ${RECOVERY}`);
 	}
 
-	private async prepare(signal: AbortSignal, preferredName?: string, selection?: SandboxList): Promise<void> {
+	private async prepare(signal: AbortSignal, preferredName?: string, selection?: SandboxList, reconnecting?: SbxSandbox): Promise<void> {
 		const deadline = Date.now() + (this.options.discoveryTimeoutMs ?? 60_000);
-		let notifiedWaiting = false;
+		let notifiedWaiting = !!reconnecting;
+		let lastError: unknown;
+		const expired = () => new Error(reconnecting
+			? `Could not reconnect to sandbox ${reconnecting.name} before the discovery deadline.${lastError instanceof Error ? ` ${lastError.message}` : ""}`
+			: "No sandbox became available before the discovery deadline.");
 		while (!signal.aborted) {
 			const remaining = deadline - Date.now();
-			if (remaining <= 0) throw new Error("No sandbox became available before the discovery deadline.");
-			const list = selection ?? await this.options.discover(signal, Math.min(10_000, remaining));
+			if (remaining <= 0) throw expired();
+			let list: SandboxList | undefined;
+			try {
+				list = selection ?? await this.options.discover(signal, Math.min(10_000, remaining));
+			} catch (error) {
+				if (!reconnecting) throw error;
+				lastError = error;
+			}
 			selection = undefined;
 			if (signal.aborted) return;
-			if (Date.now() >= deadline) throw new Error("No sandbox became available before the discovery deadline.");
-			// A saved/manual selection must not silently turn into a different sandbox.
+			if (Date.now() >= deadline) throw expired();
+			// Rediscover mounts and the instance, but never choose a different name.
 			const sandbox = preferredName
-				? list.sandboxes.find((entry) => entry.name === preferredName)
-				: list.sandboxes[0];
-			if (sandbox) {
+				? list?.sandboxes.find((entry) => entry.name === preferredName)
+				: list?.sandboxes[0];
+			if (sandbox && list) {
 				this.update({ phase: "connecting", sandbox });
+				let failure: Error | undefined;
 				const transport = this.options.createTransport(sandbox, list.executable,
 					() => { if (!signal.aborted) this.update({ phase: "initializing", sandbox }); },
-					(error) => { if (!signal.aborted) this.fail(error.message); });
+					(error) => {
+						if (signal.aborted || this.transport !== transport) return;
+						failure = error;
+						if (this.state.phase !== "ready") return; // connect() handles startup failure.
+						if (error instanceof SbxConnectionError) this.begin(sandbox.name, undefined, sandbox);
+						else this.fail(error.message);
+					});
 				this.transport = transport;
-				await transport.connect(signal);
-				// A ready frame can be followed by worker/protocol failure before
-				// connect() resumes. Never overwrite that terminal failure.
-				if (!signal.aborted && this.state.phase !== "failed") this.update({ phase: "ready", sandbox });
-				return;
+				try {
+					await transport.connect(signal);
+					// Failure may follow the ready frame before connect() resumes.
+					if (failure) throw failure;
+					if (!signal.aborted) this.update({ phase: "ready", sandbox });
+					return;
+				} catch (error) {
+					if (signal.aborted) return;
+					transport.dispose();
+					this.transport = undefined;
+					// Removal/recreation can race discovery and sbx exec. Only retry
+					// connection failures; image/protocol failures remain terminal.
+					if (!reconnecting || !(error instanceof SbxConnectionError)) throw error;
+					lastError = error;
+				}
 			}
+			if (reconnecting) this.update({ phase: "reconnecting", sandbox: reconnecting });
 			if (!notifiedWaiting) {
 				notifiedWaiting = true;
 				this.options.notify("Waiting for a sandbox for this workspace. You can keep chatting. Use /sbx off to run tools on the host.", "info");
@@ -113,6 +148,8 @@ export class SandboxConnection {
 
 	private fail(message: string): void {
 		if (this.state.phase === "failed") return;
+		this.transport?.dispose();
+		this.transport = undefined;
 		const error = `${message} Sandbox tools remain unavailable. ${RECOVERY}`;
 		this.update({ ...this.state, phase: "failed", error });
 		this.options.notify(error, "warning");
