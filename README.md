@@ -239,25 +239,82 @@ The optional integration test waits for worker/image readiness, then creates and
 
 ## Releasing
 
-The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Publishing is performed manually from a local checkout; creating a GitHub release does not publish anything automatically.
+The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/stage-publish.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer must approve the npm stage with 2FA before making the release public.
 
-Log in to the npm registry with `pnpm login` and authenticate the GitHub CLI with `gh auth login`, then run:
+### One-time npm setup
+
+Use npm **11.17.0 or newer**, log in with `npm login`, and enable 2FA on your npm account. Configure this existing package's trusted publisher:
+
+```sh
+npm trust github @christianmoesl/pi-sbx \
+  --repo ChristianMoesl/pi-sbx \
+  --file stage-publish.yml \
+  --allow-stage-publish
+```
+
+Grant **staged publishing only**, not `--allow-publish`. The workflow uses GitHub OIDC; no `NPM_TOKEN` secret is needed. If a trusted publisher already exists, inspect it with `npm trust list @christianmoesl/pi-sbx` and update it deliberately rather than blindly replacing it. Package access controls can also require 2FA and disallow bypass tokens; changing those controls is a separate maintainer decision.
+
+### Start a release
+
+Install dependencies with `pnpm install --frozen-lockfile`, then run from a clean, current `main` checkout with Git push access:
 
 ```sh
 pnpm run release <version>
+# Example:
+pnpm run release 0.6.4
 ```
 
-For example:
+The release script requires an explicit semantic version. It checks that `main` is current and the tag does not exist, runs `pnpm run check` and a package dry run, bumps the version with `pnpm version`, commits `package.json` and any `pnpm-lock.yaml` changes, pushes `main`, and creates/pushes an annotated `v<version>` tag. It **does not publish locally**, create a GitHub release locally, or require npm/GitHub CLI login.
+
+The tag push triggers three jobs:
+
+1. **Validate:** require an annotated tag reachable from `origin/main`, matching the tagged package version; install frozen dependencies, run checks, dry-run packing, and upload the packed tarball.
+2. **Stage:** download and verify that exact tarball's SHA-256, then run `npm stage publish --provenance`. Only this job has `id-token: write`; it does not install project dependencies or run package lifecycle scripts.
+3. **Release:** create a draft GitHub release with generated notes. Only this job has `contents: write`; existing drafts or published releases are preserved on retry.
+
+Stable tags use the npm `latest` dist-tag. Prerelease tags (for example `v0.7.0-beta.1`) use `next` and mark the GitHub draft as a prerelease. Manual dispatch can select a different npm dist-tag; prereleases cannot use `latest`.
+
+### Approve and publish
+
+Inspect the stage ID from the staging job's log or list stages locally:
 
 ```sh
-pnpm run release 0.5.1
+npm stage list @christianmoesl/pi-sbx
+npm stage view <stage-id>
+npm stage download <stage-id>  # optional: inspect the tarball
+npm stage approve <stage-id>   # requires 2FA; publishes on npm
+# Or reject a bad stage (also requires 2FA):
+npm stage reject <stage-id>
 ```
 
-The release script requires a clean, current `main` checkout and an explicit semantic version. It verifies registry and GitHub CLI authentication and that the release tag does not already exist before changing files. It then bumps the version with `pnpm version`, commits `package.json` and any `pnpm-lock.yaml` changes, pushes `main`, creates and pushes an annotated `v<version>` tag, and runs the publish script.
+After confirming publication on npm, publish the draft in GitHub's UI or with an authenticated GitHub CLI:
 
-The publish script verifies that `origin/main` and the release tag point to `HEAD`, runs the checks and package dry run, verifies registry authentication again, and asks for final confirmation before publishing the public package with pnpm. Publishing may require browser or 2FA approval even after login. After successful publication, the release script creates the GitHub release with generated notes.
+```sh
+gh release edit v<version> --draft=false
+```
 
-Each npm version can only be published once. If publication fails, check whether that version exists on npm before retrying. If the tag is already pushed but the version is not published, resume with `pnpm run publish:npm` in an interactive terminal rather than rerunning the release script. After that succeeds, finish with `gh release create v<version> --title v<version> --generate-notes`.
+CI does not approve npm stages or publish GitHub drafts automatically. Creating or publishing a GitHub release does not itself publish to npm.
+
+### Recovery
+
+- If the version commit or tag push fails, inspect the local commit/tag and remote state, then finish the pushes manually. Do not rerun the release script for an already-created version tag.
+- If validation fails, nothing was staged. Correct the cause before retrying.
+- If staging fails, check `npm stage list` and `npm view @christianmoesl/pi-sbx@<version> version` first: a request can succeed even if its response was lost. Retry staging only if the version is neither staged nor published.
+- If only GitHub release creation fails, use **Re-run failed jobs**; this does not repeat the successful staging job.
+- Packed artifacts are immutable, named by run ID and validation attempt, and retained for 14 days. Failed-job retries download the artifact produced by validation, even when the retry's attempt number changes. Runs for the same tag are serialized without cancelling an in-progress release.
+
+To start the pipeline for an existing tag that has **not** already been staged or published, dispatch it from `main`:
+
+```sh
+gh workflow run stage-publish.yml --ref main \
+  -f release_tag=v0.6.4 -f npm_tag=latest
+```
+
+The npm dist-tag is immutable once staged. To change it, reject the stage and re-stage with the desired tag. A pending stage reserves its package version; a published version can never be reused. Do not retry a full pipeline against an existing stage: approve/reject it first. If necessary, finish a missing GitHub draft manually with `gh release create v<version> --draft --verify-tag --generate-notes`.
+
+### Direct local publishing alternative
+
+`pnpm run publish:npm [--dry-run]` remains available as an explicit alternative. It requires a clean `main`, the release tag and `origin/main` pointing at `HEAD`, runs validation, checks npm authentication, and prompts before publishing directly. **Do not use it for a pending staged version.** Once configured, tag pushes start CI staging automatically, so do not mix the local and CI publishing paths for the same version.
 
 ## License
 

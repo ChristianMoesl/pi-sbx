@@ -49,7 +49,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --import ./test/setup.ts --test test/*.test.ts",
+    "test": "node --experimental-strip-types --import ./test/setup.ts --test test/*.test.ts scripts/*.test.mjs",
     "smoke": "pi --no-extensions -e . --offline --list-models __pi_sbx_smoke__",
     "check": "pnpm run typecheck && pnpm test && pnpm run smoke",
     "publish:npm": "./scripts/publish-npm.sh",

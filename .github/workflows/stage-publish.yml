@@ -1,0 +1,201 @@
+name: Stage and release npm package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact release tag v<package.json version>, already pushed and reachable from main (recovery)
+        required: true
+        type: string
+      npm_tag:
+        description: npm dist-tag override (blank selects latest, or next for prereleases)
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: stage-publish-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      sha: ${{ steps.validate.outputs.sha }}
+      npm_tag: ${{ steps.validate.outputs.npm_tag }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      artifact_name: ${{ steps.pack.outputs.artifact_name }}
+    steps:
+      - name: Checkout with tags and history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Untrusted inputs reach the helper only through env. The helper enforces:
+      # push -> ref must be refs/tags/<tag>; workflow_dispatch -> ref must be refs/heads/main.
+      # Both: strict release tag, annotated, reachable from origin/main, package.json version matches.
+      - name: Validate release tag and npm tag
+        id: validate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          NPM_TAG: ${{ inputs.npm_tag || (contains(inputs.release_tag || github.ref_name, '-') && 'next' || 'latest') }}
+        run: node scripts/stage-publish-validate.mjs
+
+      - name: Check out validated tagged commit (detached)
+        env:
+          RESOLVED_SHA: ${{ steps.validate.outputs.sha }}
+        run: git checkout --detach "$RESOLVED_SHA"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install npm 11.17.0
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.17.0
+          test "$(npm -v)" = "11.17.0"
+
+      - name: Install dependencies (frozen)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run checks
+        run: pnpm run check
+
+      - name: Pack tarball (no lifecycle scripts)
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --dry-run --ignore-scripts
+          npm pack --ignore-scripts --json --pack-destination dist > pack.json
+          tarball="$(node -e 'const r = JSON.parse(require("fs").readFileSync("pack.json", "utf8")); if (r.length !== 1) throw new Error("expected exactly one tarball"); process.stdout.write(r[0].filename)')"
+          case "$tarball" in
+            ""|*[!A-Za-z0-9._-]*) echo "unexpected tarball name" >&2; exit 1 ;;
+          esac
+          test -f "dist/$tarball"
+          sha256="$(shasum -a 256 "dist/$tarball" | cut -d' ' -f1)"
+          {
+            echo "tarball=$tarball"
+            echo "sha256=$sha256"
+            echo "artifact_name=stage-tarball-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload packed tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.artifact_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  stage:
+    # Privileged: no repo scripts run, no dependency install. Only downloads and publishes the verified tarball.
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout validated commit (provenance context only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install npm 11.17.0
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.17.0
+          test "$(npm -v)" = "11.17.0"
+
+      - name: Download packed tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: dist
+
+      - name: Verify exact tarball
+        env:
+          TARBALL: ${{ needs.validate.outputs.tarball }}
+          EXPECTED_SHA256: ${{ needs.validate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          case "$TARBALL" in
+            ""|*[!A-Za-z0-9._-]*) echo "unexpected tarball name" >&2; exit 1 ;;
+          esac
+          test "$(find dist -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')" = "1"
+          test -f "dist/$TARBALL"
+          echo "$EXPECTED_SHA256  dist/$TARBALL" | shasum -a 256 -c -
+
+      - name: Stage npm publish (OIDC, staged, no direct publish)
+        env:
+          TARBALL: ${{ needs.validate.outputs.tarball }}
+          NPM_TAG: ${{ needs.validate.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+          npm stage publish "./dist/$TARBALL" \
+            --access public \
+            --tag "$NPM_TAG" \
+            --provenance \
+            --ignore-scripts \
+            --registry https://registry.npmjs.org/
+
+  release:
+    # Creates a DRAFT GitHub release only. Publishing the release is a manual step after npm stage approval.
+    needs: [validate, stage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft release or preserve existing one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # $ENV is evaluated by jq, not by the shell.
+          # shellcheck disable=SC2016
+          states="$(gh api --paginate "repos/$REPO/releases" \
+            --jq '.[] | select(.tag_name == $ENV.RELEASE_TAG) | if .draft then "draft" else "published" end')"
+          if grep -qx published <<<"$states"; then
+            echo "::notice::Published release for $RELEASE_TAG exists; leaving it unchanged."
+            exit 0
+          fi
+          if grep -qx draft <<<"$states"; then
+            echo "::notice::Draft release for $RELEASE_TAG exists; preserving it."
+            exit 0
+          fi
+          prerelease_args=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease_args=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$REPO" \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --notes "Staged on npm; approve the npm stage with 2FA before publishing this draft." \
+            --target "$RELEASE_SHA" \
+            "${prerelease_args[@]}" \
+            --title "$RELEASE_TAG"

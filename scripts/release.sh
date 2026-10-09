@@ -9,7 +9,9 @@ usage() {
 Usage: pnpm run release <version>
 
 <version> must be an explicit semantic version, for example 1.2.3.
-This command expects pnpm to be authenticated with the npm registry and gh to be authenticated for GitHub releases.
+Run from a clean, current main checkout with dependencies installed.
+This command pushes a version commit and annotated tag to trigger the CI release pipeline.
+It does not publish to npm or require npm/GitHub CLI authentication.
 EOF
 }
 
@@ -24,7 +26,6 @@ if [[ $# -ne 1 ]]; then
 fi
 
 requested_version=$1
-registry="https://registry.npmjs.org/"
 
 if [[ ! "${requested_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
 	echo "Error: version must be an explicit semantic version, for example 1.2.3." >&2
@@ -41,14 +42,6 @@ if [[ -n "$(git status --porcelain)" ]]; then
 	exit 1
 fi
 
-# Fail before changing package files when required authentication or the release tag is invalid.
-pnpm --registry "${registry}" whoami >/dev/null
-if ! command -v gh >/dev/null; then
-	echo "Error: gh is required to create the GitHub release." >&2
-	exit 1
-fi
-gh auth status >/dev/null
-
 git fetch origin main --tags
 head_commit=$(git rev-parse HEAD)
 if [[ "$(git rev-parse origin/main)" != "${head_commit}" ]]; then
@@ -62,6 +55,10 @@ if git rev-parse --verify --quiet "refs/tags/${release_tag}" >/dev/null || \
 	echo "Error: ${release_tag} already exists." >&2
 	exit 1
 fi
+
+# Validate before changing files or creating the release commit.
+pnpm run check
+npm pack --dry-run --ignore-scripts
 
 pnpm version "${requested_version}" --no-git-tag-version
 package_version=$(node -p "require('./package.json').version")
@@ -78,5 +75,6 @@ git push origin main
 git tag -a "${release_tag}" -m "${release_tag}"
 git push origin "${release_tag}"
 
-pnpm run publish:npm
-gh release create "${release_tag}" --title "${release_tag}" --generate-notes
+echo "Pushed ${release_tag}; the Stage and release npm package workflow will validate and stage it."
+echo "After CI succeeds, approve the npm stage with 2FA, then publish the draft GitHub release."
+echo "This script does not publish the package locally."
