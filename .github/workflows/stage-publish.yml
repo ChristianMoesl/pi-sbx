@@ -36,6 +36,10 @@ jobs:
       - name: Checkout with tags and history
         uses: actions/checkout@v4
         with:
+          # Explicit main avoids checkout's tag-push fallback replacing an
+          # annotated tag with GITHUB_SHA (the peeled commit). The validator
+          # resolves the fetched tag before checking out its exact commit.
+          ref: main
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -157,6 +161,7 @@ jobs:
             --tag "$NPM_TAG" \
             --provenance \
             --ignore-scripts \
+            --loglevel verbose \
             --registry https://registry.npmjs.org/
 
   release:
