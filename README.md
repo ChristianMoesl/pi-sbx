@@ -241,7 +241,7 @@ The optional integration test waits for worker/image readiness, then creates and
 
 ## Releasing
 
-The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/stage-publish.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer must approve the npm stage with 2FA before making the release public.
+The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/release.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer must approve the npm stage with 2FA before making the release public.
 
 ### One-time npm setup
 
@@ -250,7 +250,7 @@ Use npm **11.17.0 or newer**, log in with `npm login`, and enable 2FA on your np
 ```sh
 npm trust github @christianmoesl/pi-sbx \
   --repo ChristianMoesl/pi-sbx \
-  --file stage-publish.yml \
+  --file release.yml \
   --allow-stage-publish
 ```
 
@@ -308,7 +308,7 @@ CI does not approve npm stages or publish GitHub drafts automatically. Creating 
 To start the pipeline for an existing tag that has **not** already been staged or published, dispatch it from `main`:
 
 ```sh
-gh workflow run stage-publish.yml --ref main \
+gh workflow run release.yml --ref main \
   -f release_tag=v0.6.4 -f npm_tag=latest
 ```
 

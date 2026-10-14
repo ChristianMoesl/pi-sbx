@@ -1,3 +1,5 @@
+# npm's existing trusted publisher is bound to this exact filename: release.yml.
+# Keep the staged-only grant; renaming requires coordinating the npm trust entry.
 name: Stage and release npm package
 
 on:

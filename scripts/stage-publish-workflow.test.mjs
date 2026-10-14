@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const workflow = readFileSync(new URL('../.github/workflows/stage-publish.yml', import.meta.url), 'utf8');
+const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 const validate = workflow.split('\n  validate:')[1].split('\n  stage:')[0];
 const stage = workflow.split('\n  stage:')[1].split('\n  release:')[0];
 const release = workflow.split('\n  release:')[1];
