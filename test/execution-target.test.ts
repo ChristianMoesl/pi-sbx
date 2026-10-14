@@ -90,11 +90,9 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 		getActiveTools: () => options.activeTools ?? [...ROUTED_TOOLS],
 		exec: async () => ({
 			code: 0,
-			stdout: JSON.stringify({
-				sandboxes: sandbox
-					? (options.sandboxNames ?? ["test-sandbox"]).map((name) => ({ name, status: "running", workspaces: [process.cwd()] }))
-					: [],
-			}),
+			stdout: JSON.stringify(sandbox
+				? (options.sandboxNames ?? ["test-sandbox"]).map((name) => ({ name, status: "running", workspaces: [process.cwd()] }))
+				: []),
 			stderr: "",
 		}),
 	} as unknown as ExtensionAPI;

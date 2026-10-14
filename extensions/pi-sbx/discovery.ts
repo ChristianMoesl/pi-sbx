@@ -11,26 +11,22 @@ export interface SbxSandbox {
 	mounts: WorkspaceMount[];
 }
 
-interface SbxListResponse {
-	sandboxes?: unknown;
-}
-
 function mountedPath(value: string): string {
 	return value.endsWith(":ro") ? value.slice(0, -3) : value;
 }
 
 function parseSandboxList(output: string): Record<string, unknown>[] {
-	let parsed: SbxListResponse;
+	let parsed: unknown;
 	try {
-		parsed = JSON.parse(output) as SbxListResponse;
+		parsed = JSON.parse(output);
 	} catch (error) {
 		throw new Error(`Could not parse sbx ls --json output: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
-	if (!parsed || !Array.isArray(parsed.sandboxes)) {
-		throw new Error("Could not parse sbx ls --json output: missing sandboxes array");
+	if (!Array.isArray(parsed)) {
+		throw new Error("Could not parse sbx ls --json output: expected a sandbox array (SBX 0.48.0+ required)");
 	}
-	return parsed.sandboxes.filter((value): value is Record<string, unknown> => value !== null && typeof value === "object");
+	return parsed.filter((value): value is Record<string, unknown> => value !== null && typeof value === "object");
 }
 
 export function parseMatchingSandboxes(
