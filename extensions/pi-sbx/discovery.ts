@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isWsl } from "./cli.ts";
 import { isWindowsPath, relativeWithin, sandboxWorkspacePath, type WorkspaceMount } from "./paths.ts";
@@ -26,7 +27,12 @@ function parseSandboxList(output: string): Record<string, unknown>[] {
 	if (!Array.isArray(parsed)) {
 		throw new Error("Could not parse sbx ls --json output: expected a sandbox array (SBX 0.48.0+ required)");
 	}
-	return parsed.filter((value): value is Record<string, unknown> => value !== null && typeof value === "object");
+	for (const value of parsed) {
+        if (value === null || typeof value !== "object" || Array.isArray(value) || typeof value.name !== "string" || !value.name.trim() || !Array.isArray(value.workspaces) || !value.workspaces.every((workspace: unknown) => typeof workspace === "string")) {
+            throw new Error("Could not parse sbx ls --json output: sandbox rows require a name and a workspaces array");
+        }
+    }
+    return parsed as Record<string, unknown>[];
 }
 
 export function parseMatchingSandboxes(
@@ -75,7 +81,8 @@ export async function discoverSandboxes(
 		if (milliseconds <= 0) throw new Error("Sandbox discovery timed out");
 		return milliseconds;
 	};
-	const result = await exec(executable, ["ls", "--json"], { timeout: remaining(), signal: options.signal });
+	const nativeWsl=wsl && path.basename(executable)==="sbx";
+ const result = await exec(nativeWsl ? "env" : executable, nativeWsl ? ["DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE=0",executable,"ls","--json"] : ["ls", "--json"], { timeout: remaining(), signal: options.signal });
 	remaining();
 	if (result.code !== 0 || result.killed) {
 		throw new Error(result.stderr.trim() || `${executable} ls --json ${result.killed ? "timed out" : `exited with code ${result.code}`}`);

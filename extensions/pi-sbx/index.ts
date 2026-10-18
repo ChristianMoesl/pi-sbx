@@ -338,7 +338,8 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 	const localLs = createLsTool(cwd);
 	const localFind = createFindTool(cwd);
 	const localGrep = createGrepTool(cwd);
-	let selectedName: string | undefined;
+	let requiredName = process.env.PI_SBX_REQUIRED_SANDBOX?.trim() || undefined;
+ let selectedName: string | undefined = requiredName;
 	let context: ExtensionContext | undefined;
 	let commandController = new AbortController();
 	let sessionGeneration = 0;
@@ -390,6 +391,7 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 	}
 
 	function startSandbox(preferredName?: string, list?: SandboxList): void {
+        preferredName=requiredName ?? preferredName;
 		// Persist intent before connecting. Reload during a failed/pending /sbx on
 		// must not restore an earlier explicit host choice.
 		pi.appendEntry<SelectionState>(STATE_ENTRY, { hostDisabled: false, name: preferredName });
@@ -605,7 +607,20 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 		return { systemPrompt: `${systemPrompt}\n\n${environment}` };
 	});
 
-	pi.on("session_shutdown", () => {
+    const stopRequiredListener = pi.events.on("pi-sbx:require", (data: unknown) => {
+        const request=data as {name?:unknown; acknowledge?:unknown};
+        if (!request || typeof request.name!=="string" || !request.name.trim() || typeof request.acknowledge!=="function") return;
+        if (requiredName!==request.name) {
+            requiredName=request.name;
+            selectedName=requiredName;
+            // Cancel explicit host mode immediately when a launcher attaches a runtime.
+            connection.start(requiredName);
+        }
+        request.acknowledge();
+    });
+
+    pi.on("session_shutdown", () => {
+        stopRequiredListener();
 		sessionGeneration++;
 		commandController.abort();
 		approvedHostCalls.clear();
@@ -622,9 +637,9 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 		discoveredSkills = [];
 		context = ctx;
 		const restored = restoredSelection(ctx);
-		selectedName = restored?.name;
-		if (restored?.hostDisabled) connection.host();
-		else connection.start(selectedName);
+		selectedName = requiredName ?? restored?.name;
+        if (!requiredName && restored?.hostDisabled) connection.host();
+        else connection.start(selectedName);
 	});
 
 	pi.registerCommand("sbx", {
@@ -651,6 +666,7 @@ export default function piSbxExtension(pi: ExtensionAPI, overrides: ConnectionOv
 			let list;
 			try {
 				list = await connection.list(controller.signal);
+                if (requiredName) list={...list,sandboxes:list.sandboxes.filter(sandbox=>sandbox.name===requiredName)};
 			} catch {
 				if (!controller.signal.aborted) ctx.ui.notify("Could not discover sbx sandboxes. The execution mode was not changed. Run /sbx to retry or /sbx off for host execution.", "warning");
 				return;

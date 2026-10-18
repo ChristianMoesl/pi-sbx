@@ -25,6 +25,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+ requireSandbox(name:string):boolean;
 	commands: Map<string, any>;
 	notifications: string[];
 	notificationTypes: Array<"info" | "warning" | "error" | undefined>;
@@ -76,7 +77,12 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 		},
 	} as unknown as ExtensionCommandContext;
 
-	const pi = {
+	const bus=new Map<string,Set<(data:unknown)=>void>>();
+ const pi = {
+        events:{
+          on(channel:string,handler:(data:unknown)=>void){const listeners=bus.get(channel)??new Set();listeners.add(handler);bus.set(channel,listeners);return ()=>{listeners.delete(handler)}},
+          emit(channel:string,data:unknown){for(const handler of bus.get(channel)??[])handler(data)},
+        },
 		registerTool(tool: RegisteredTool) {
 			tools.set((tool as RegisteredTool & { name: string }).name, tool);
 		},
@@ -109,6 +115,7 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 	});
 
 	const harness: Harness = {
+        requireSandbox(name){let acknowledged=false;pi.events.emit("pi-sbx:require",{name,acknowledge:()=>{acknowledged=true}});return acknowledged},
 		commands, notifications, notificationTypes, statuses, entries,
 		tools,
 		handlers,
@@ -569,4 +576,32 @@ test("new commands and session changes dismiss a pending sbx menu and ignore its
 		assert.equal(harness.entries.length, entries);
 		assert.equal(harness.statuses.at(-1), status);
 	}
+});
+
+test("launcher attachment cancels restored host mode and pins the required sandbox", async () => {
+ const harness=createHarness({host:true,sandboxNames:["other-sandbox","required-sandbox"]});
+ await startHarness(harness);
+ assert.equal(harness.requireSandbox("required-sandbox"),true);
+ // The transition is synchronous: a missing/not-yet-connected worker never returns host operations.
+ const shell=(await harness.emit("user_bash",{}))[0];
+ assert.ok(shell?.operations);
+ await harness.commands.get("sbx").handler("off",harness.context);
+ assert.equal((await harness.emit("user_bash",{}))[0],undefined);
+ // Repeated declarations do not revoke deliberate host consent. /sbx on pins the required name.
+ harness.requireSandbox("required-sandbox");
+ assert.equal((await harness.emit("user_bash",{}))[0],undefined);
+ await harness.commands.get("sbx").handler("on",harness.context);
+ await new Promise(resolve=>setTimeout(resolve,100));
+ assert.ok(harness.statuses.some(status=>status==="sbx: required-sandbox"));
+});
+
+test("a missing required sandbox never selects another matching sandbox", async () => {
+ const harness=createHarness({host:true,sandboxNames:["other-sandbox"]});
+ await startHarness(harness);
+ harness.requireSandbox("missing-sandbox");
+ await assert.rejects(harness.tools.get("bash")!.execute("required-call",{command:"echo must-not-run"}),/not ready/);
+ assert.ok(!harness.statuses.some(status=>status==="sbx: other-sandbox"));
+ const results=await harness.emit("tool_call",{toolName:"bash",toolCallId:"host-approved",input:{command:"true",execution_target:"host"}});
+ assert.equal(results[0],undefined);
+ assert.equal(harness.confirmations.length,1);
 });

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { sbxEnvironment } from "./cli.ts";
 import { WorkspacePaths } from "./paths.ts";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
@@ -76,6 +77,7 @@ function spawnSbxWorker(sandbox: string, cwd: string, executable: string): Child
 		// A Windows process holds its host cwd open. Don't lock the project directory
 		// for the lifetime of sbx.exe; --workdir sets the independent sandbox cwd.
 		cwd: tmpdir(),
+        env: sbxEnvironment(executable),
 		detached: process.platform !== "win32",
 		windowsHide: true,
 		stdio: ["pipe", "pipe", "pipe"],

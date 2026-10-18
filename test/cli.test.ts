@@ -56,3 +56,12 @@ test("a named override uses PATH but never falls back to a different command", p
 	assert.equal(resolveSbxExecutable({ env: { PATH: root, PI_SBX_EXECUTABLE: "custom-sbx" } }), path.join(root, "custom-sbx"));
 	assert.equal(resolveSbxExecutable({ env: { PATH: root, PI_SBX_EXECUTABLE: "missing-sbx" } }), "missing-sbx");
 });
+
+test("native WSL cache policy is subprocess-local and never changes Windows or non-WSL environments", async () => {
+ const {sbxEnvironment}=await import("../extensions/pi-sbx/cli.ts");
+ const env={PATH:"/bin",DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE:"1"};
+ assert.deepEqual(sbxEnvironment("/tools/sbx",env,true),{...env,DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE:"0"});
+ assert.equal(env.DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE,"1");
+ assert.equal(sbxEnvironment("sbx.exe",env,true),env);
+ assert.equal(sbxEnvironment("sbx",env,false),env);
+});

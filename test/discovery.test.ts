@@ -80,7 +80,7 @@ test("WSL discovery translates Windows workspaces using wslpath, including custo
 
 test("POSIX discovery does not invoke wslpath", async () => {
 	const exec: Parameters<typeof discoverSandboxes>[0] = async (command) => {
-		assert.equal(command, "sbx");
+		assert.ok(command === "sbx" || command === "env");
 		return { code: 0, stderr: "", killed: false, stdout: JSON.stringify([{ name: "native", workspaces: [cwd] }]) };
 	};
 	assert.equal((await discoverSandboxes(exec, "sbx", cwd, false))[0]?.name, "native");
@@ -117,12 +117,11 @@ test("already cancelled discovery never spawns a command", async () => {
 	}, "sbx", cwd, false, { signal: controller.signal }), /aborted/);
 });
 
-test("accepts an empty sandbox array and ignores unusable entries", () => {
-	assert.deepEqual(parseMatchingSandboxes("[]", cwd), []);
-	assert.deepEqual(parseMatchingSandboxes(JSON.stringify([
-		null, 42, "invalid", {}, { name: "missing-mounts" },
-		{ name: "valid", workspaces: [cwd] },
-	]), cwd).map((sandbox) => sandbox.name), ["valid"]);
+test("empty inventories are valid, malformed rows cannot masquerade as absence", () => {
+ assert.deepEqual(parseMatchingSandboxes("[]", cwd), []);
+ for(const entry of [null,42,"invalid",{},{name:"missing-mounts"},{name:"bad-path",workspaces:[3]}]) {
+  assert.throws(()=>parseMatchingSandboxes(JSON.stringify([entry]),cwd),/rows require/);
+ }
 });
 
 test("rejects the pre-0.48 wrapper with upgrade guidance", () => {

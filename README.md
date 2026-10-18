@@ -321,3 +321,35 @@ The npm dist-tag is immutable once staged. To change it, reject the stage and re
 ## License
 
 MIT
+
+### Launcher-required sandbox (0.7.0)
+
+A launcher can set `PI_SBX_REQUIRED_SANDBOX` to an exact sandbox name before
+starting Pi. Discovery/reconnection never selects a different sandbox, even if
+several mount the working directory. A restored host selection cannot bypass
+this launch requirement; `/sbx off` remains deliberate user consent afterward.
+
+For attachment to an already-running Pi process, launchers use Pi's public event
+bus, synchronously:
+
+```ts
+let accepted = false;
+pi.events.emit("pi-sbx:require", {
+  name: "example-sandbox",
+  acknowledge: () => { accepted = true; },
+});
+```
+
+pi-sbx cancels previous routing (including host mode) before acknowledging a new
+name. The launcher must block ordinary shell/filesystem tools if no provider
+acknowledges; an older/disabled extension is not permission for host execution.
+Repeated declarations of the same name do not undo a later deliberate `/sbx off`.
+The contract contains no Radar registry paths or schemas.
+
+On native WSL, discovery and the worker's CLI subprocess receive
+`DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE=0`, without changing Pi's environment.
+This does not reconfigure an already-running daemon. Before creating/reusing
+Windows-backed mounts, establish the same policy in the native daemon's startup
+environment and deliberately restart it if necessary. pi-sbx never creates,
+restarts, or deletes sandboxes or daemons. Native SBX inside WSL remains an
+upstream best-effort setup; Windows `sbx.exe` is a separate backend.

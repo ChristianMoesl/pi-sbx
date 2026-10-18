@@ -42,3 +42,8 @@ export function resolveSbxExecutable(options: ExecutableOptions = {}): string {
 	// Let the caller report the normal discovery failure when SBX is not installed.
 	return candidates[0]!;
 }
+
+/** Keep WSL virtiofs cache policy local to native CLI subprocesses. */
+export function sbxEnvironment(executable: string, env: NodeJS.ProcessEnv = process.env, wsl = isWsl()): NodeJS.ProcessEnv {
+ return wsl && path.basename(executable)==="sbx" ? {...env,DOCKER_SANDBOXES_ENABLE_VIRTIOFS_CACHE:"0"} : env;
+}
