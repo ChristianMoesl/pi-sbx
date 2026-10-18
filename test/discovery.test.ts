@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { discoverSandboxes, parseMatchingSandboxes } from "../extensions/pi-sbx/discovery.ts";
+import { discoverSandboxes, parseMatchingSandboxes, validateSbxVersion } from "../extensions/pi-sbx/discovery.ts";
 
 const cwd = "/Users/example/work/repo/feature";
 
@@ -56,6 +56,7 @@ test("WSL discovery translates Windows workspaces using wslpath, including custo
 	const calls: Array<[string, string[]]> = [];
 	const exec: Parameters<typeof discoverSandboxes>[0] = async (command, args) => {
 		calls.push([command, args]);
+        if(args[0]==="version") return {code:0,stderr:"",killed:false,stdout:'{"client":{"version":"v0.48.0"}}'};
 		if (command === "/windows bin/sbx.exe") {
 			assert.deepEqual(args, ["ls", "--json"]);
 			return { code: 0, stderr: "", killed: false, stdout: JSON.stringify([
@@ -79,7 +80,8 @@ test("WSL discovery translates Windows workspaces using wslpath, including custo
 });
 
 test("POSIX discovery does not invoke wslpath", async () => {
-	const exec: Parameters<typeof discoverSandboxes>[0] = async (command) => {
+	const exec: Parameters<typeof discoverSandboxes>[0] = async (command, args) => {
+        if(args.includes("version")) return {code:0,stderr:"",killed:false,stdout:'{"client":{"version":"v0.48.0"}}'};
 		assert.ok(command === "sbx" || command === "env");
 		return { code: 0, stderr: "", killed: false, stdout: JSON.stringify([{ name: "native", workspaces: [cwd] }]) };
 	};
@@ -93,7 +95,7 @@ test("discovery reports CLI failures and timeouts rather than trying another ins
 	}), "sbx.exe", cwd), /daemon unavailable/);
 	await assert.rejects(discoverSandboxes(async () => ({
 		code: 0, killed: true, stdout: "", stderr: "",
-	}), "sbx.exe", cwd), /sbx\.exe ls --json timed out/);
+	}), "sbx.exe", cwd), /sbx\.exe version --json timed out/);
 });
 
 test("discovery forwards cancellation and does not accept results after cancellation", async () => {
@@ -125,5 +127,16 @@ test("empty inventories are valid, malformed rows cannot masquerade as absence",
 });
 
 test("rejects the pre-0.48 wrapper with upgrade guidance", () => {
-	assert.throws(() => parseMatchingSandboxes('{"sandboxes":[]}', cwd), /SBX 0\.48\.0\+ required/);
+	assert.throws(() => parseMatchingSandboxes('{"sandboxes":[]}', cwd), /SBX 0\.48\.x required/);
+});
+
+
+test("accepts only the qualified stable 0.48 protocol family", async () => {
+ for (const version of ["v0.48.0","0.48.9"]) assert.doesNotThrow(()=>validateSbxVersion(JSON.stringify({client:{version}})));
+ for (const output of ["bad","null","{}",...['v0.46.0','v0.49.0','v0.48.0-rc.3'].map(version=>JSON.stringify({client:{version}}))]) {
+  assert.throws(()=>validateSbxVersion(output),/SBX 0\.48\.x required/);
+ }
+ let calls=0;
+ await assert.rejects(discoverSandboxes(async()=>{calls++;return {code:0,stderr:"",killed:false,stdout:'{"client":{"version":"v0.49.0"}}'};},"sbx",cwd,false),/SBX 0\.48\.x required/);
+ assert.equal(calls,1,"version failures must not proceed to discovery or another executable");
 });

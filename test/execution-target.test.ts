@@ -94,9 +94,9 @@ function createHarness(options: { sandbox?: boolean; sandboxNames?: string[]; ha
 		},
 		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
 		getActiveTools: () => options.activeTools ?? [...ROUTED_TOOLS],
-		exec: async () => ({
-			code: 0,
-			stdout: JSON.stringify(sandbox
+		exec: async (_command: string,args:string[]) => ({
+            code: 0,
+            stdout: args.includes("version") ? '{"client":{"version":"v0.48.0"}}' : JSON.stringify(sandbox
 				? (options.sandboxNames ?? ["test-sandbox"]).map((name) => ({ name, status: "running", workspaces: [process.cwd()] }))
 				: []),
 			stderr: "",

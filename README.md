@@ -15,7 +15,7 @@ Running Pi itself in a sandbox means mounting its configuration, provider creden
 
 Sandboxing is enabled by default. If SBX is missing, unavailable, or still being created, routed tools do **not** silently run on the host. Use `/sbx off` to explicitly use Pi's normal host tools; chatting remains available throughout startup.
 
-Requires **SBX 0.48.0 or newer** (`sbx version`). Discovery reads the top-level array returned by `sbx ls --json`; older wrapper-object output is not supported.
+Requires **SBX 0.48.x** (`sbx version`). Discovery reads the top-level array returned by `sbx ls --json`; older wrapper-object output is not supported.
 
 The extension supports macOS hosts and Pi running inside WSL2 with Windows Docker Sandboxes. Sandboxes must run Linux. WSL2 integration has been tested with `sbx.exe` v0.43.0, using both WSL-filesystem and Windows-drive workspaces. Running Pi directly in native Windows Node.js is not yet supported; run Pi inside WSL instead.
 
