@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
@@ -348,6 +348,44 @@ test("reads Pi-discovered skills from the host while sandboxing is active", asyn
 	);
 	assert.match(result.content[0].text, /Discovered host skill/);
 	assert.equal(harness.confirmations.length, 0);
+});
+
+test("ordinary reads recognize discovered skill aliases without authorizing unrelated host files", async (t) => {
+	// No sandbox transport: a successful read must use the discovered-skill exception.
+	const harness = createHarness({ sandbox: false });
+	await startHarness(harness);
+	const root = await mkdtemp(path.join(tmpdir(), "pi-sbx-skill-alias-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const canonicalDirectory = path.join(root, "canonical");
+	const advertisedDirectory = path.join(root, "advertised");
+	await mkdir(canonicalDirectory);
+	await symlink(canonicalDirectory, advertisedDirectory);
+	await writeFile(path.join(canonicalDirectory, "SKILL.md"), "# Aliased host skill\n");
+	await writeFile(path.join(canonicalDirectory, "reference.md"), "# Host skill reference\n");
+	const unrelatedFile = path.join(root, "unrelated.txt");
+	await writeFile(unrelatedFile, "unrelated host content\n");
+	await harness.emit("before_agent_start", {
+		systemPrompt: "base",
+		systemPromptOptions: { skills: [{ filePath: path.join(advertisedDirectory, "SKILL.md"), baseDir: advertisedDirectory }] },
+	});
+
+	for (const [file, expected] of [["SKILL.md", /Aliased host skill/], ["reference.md", /Host skill reference/]] as const) {
+		const input = { path: path.join(canonicalDirectory, file) };
+		await harness.emit("tool_call", toolCall("read", file, input));
+		const result = await harness.tools.get("read")!.execute(file, input);
+		assert.match(result.content[0].text, expected);
+	}
+	assert.equal(harness.confirmations.length, 0);
+
+	for (const file of [unrelatedFile, path.join(root, "sandbox-only.txt")]) {
+		await assert.rejects(harness.tools.get("read")!.execute("sandbox-read", { path: file }), /Sandbox not ready/);
+	}
+	const hostInput = { path: unrelatedFile, execution_target: "host" };
+	await assert.rejects(harness.tools.get("read")!.execute("host-read", hostInput), /not approved/);
+	await harness.emit("tool_call", toolCall("read", "host-read", hostInput));
+	assert.equal(harness.confirmations.length, 1);
+	const result = await harness.tools.get("read")!.execute("host-read", hostInput);
+	assert.match(result.content[0].text, /unrelated host content/);
 });
 
 test("describes connected, waiting and explicitly disabled sandboxing accurately", async () => {
