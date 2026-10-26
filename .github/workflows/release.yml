@@ -167,7 +167,7 @@ jobs:
             --registry https://registry.npmjs.org/
 
   release:
-    # Creates a DRAFT GitHub release only. Publishing the release is a manual step after npm stage approval.
+    # Creates a draft; the publication workflow checks npm approval before publishing it.
     needs: [validate, stage]
     runs-on: ubuntu-latest
     permissions:

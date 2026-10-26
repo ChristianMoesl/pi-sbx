@@ -241,7 +241,7 @@ The optional integration test waits for worker/image readiness, then creates and
 
 ## Releasing
 
-The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/release.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer must approve the npm stage with 2FA before making the release public.
+The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/release.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer approves the npm stage with 2FA; a separate publication workflow then publishes the matching GitHub draft once that exact version is public on npm.
 
 ### One-time npm setup
 
@@ -272,7 +272,9 @@ The tag push triggers three jobs:
 
 1. **Validate:** require an annotated tag reachable from `origin/main`, matching the tagged package version; install frozen dependencies, run checks, dry-run packing, and upload the packed tarball.
 2. **Stage:** download and verify that exact tarball's SHA-256, then run `npm stage publish --provenance`. Only this job has `id-token: write`; it does not install project dependencies or run package lifecycle scripts.
-3. **Release:** create a draft GitHub release with generated notes. Only this job has `contents: write`; existing drafts or published releases are preserved on retry.
+3. **Release:** create a draft GitHub release with generated notes. It has `contents: write`; existing drafts or published releases are preserved on retry.
+
+The [publication workflow](.github/workflows/publish-approved-releases.yml) checks only pipeline-created drafts and publishes them after their exact package version becomes public on npm. It revalidates the annotated tag, reachability from `main`, and tagged package identity/version. It uses public registry metadata and GitHub permissions, not npm credentials, OIDC, or stage approval. It is separate from staging and never rebuilds or restages a release.
 
 Stable tags use the npm `latest` dist-tag. Prerelease tags (for example `v0.7.0-beta.1`) use `next` and mark the GitHub draft as a prerelease. Manual dispatch can select a different npm dist-tag; prereleases cannot use `latest`.
 
@@ -289,13 +291,17 @@ npm stage approve <stage-id>   # requires 2FA; publishes on npm
 npm stage reject <stage-id>
 ```
 
-After confirming publication on npm, publish the draft in GitHub's UI or with an authenticated GitHub CLI:
+That npm approval is the only manual approval step. During an agent-assisted release, tell the agent once approval succeeds: it verifies npm publication, triggers the publication workflow immediately, and monitors the result. The same workflow runs daily at **06:17 UTC** as a fallback when approval happens outside a session; GitHub may delay scheduled runs.
+
+To trigger the check directly:
 
 ```sh
-gh release edit v<version> --draft=false
+gh workflow run publish-approved-releases.yml --repo ChristianMoesl/pi-sbx --ref main
 ```
 
-CI does not approve npm stages or publish GitHub drafts automatically. Creating or publishing a GitHub release does not itself publish to npm.
+Unapproved or rejected stages stay as drafts. Already-published releases and drafts without the pipeline's opening staging notice are left unchanged; retain that notice when editing generated draft notes.
+
+CI never approves npm stages. The publication check fails closed on registry errors or mismatched metadata; the next scheduled run checks again. Creating or publishing a GitHub release does not itself publish to npm.
 
 ### Recovery
 

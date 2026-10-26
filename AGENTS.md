@@ -10,5 +10,6 @@
 
 - A release request uses `pnpm run release <version>` on clean, current `main`. It pushes the version commit and annotated tag; the tag-triggered GitHub Actions workflow validates, stages npm via OIDC, and creates a draft GitHub release.
 - Do not require local npm login or credentials for this workflow, or treat a local npm authentication failure as a CI release blocker. Monitor the tag-triggered workflow instead.
-- Manual npm stage approval, local publishing, and publishing the GitHub draft are separate maintainer steps. Do not attempt them or request local authentication unless the user explicitly asks for those steps.
+- Manual npm stage approval remains a maintainer step. Do not approve stages, publish locally, or request local npm authentication unless explicitly asked. The publication workflow publishes pipeline-created GitHub drafts only after the exact version is public on npm, with a daily scheduled fallback; do not publish drafts with ad-hoc commands.
+- As soon as the user confirms npm stage approval, verify that the exact release version is public on npm, then trigger `gh workflow run publish-approved-releases.yml --repo ChristianMoesl/pi-sbx --ref main`. Monitor that run and confirm the GitHub release is public; do not wait for the daily fallback and never rerun the staging workflow for an approved package.
 - Report the confirmed state accurately: tag pushed, CI succeeded/failed/pending, package staged, or package published. Do not claim publication merely because the tag was pushed.

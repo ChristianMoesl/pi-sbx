@@ -55,6 +55,7 @@ test('release validates, bumps, pushes main and annotated tag without publishing
   const f = fixture();
   const r = f.run(['1.1.0-beta.1']);
   assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /tell the agent once approved so it triggers GitHub publication/);
   assert.deepEqual(f.commands(), [
     'pnpm run check', 'npm pack --dry-run --ignore-scripts', 'pnpm version 1.1.0-beta.1 --no-git-tag-version',
   ]);

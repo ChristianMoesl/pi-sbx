@@ -1,0 +1,40 @@
+name: Publish approved npm releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily fallback when npm approval happens outside an agent-assisted release.
+    - cron: '17 6 * * *'
+
+permissions: {}
+
+concurrency:
+  group: publish-approved-releases
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted main and release tags
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Publish drafts whose exact version is public on npm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: node scripts/publish-approved-releases.mjs

@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+export const PACKAGE_NAME = '@christianmoesl/pi-sbx';
+
 // Strict vX.Y.Z with optional prerelease (no build metadata).
 const RELEASE_TAG_PATTERN =
   /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
@@ -58,6 +60,12 @@ export function validateStagePublish({ eventName, ref, releaseTag, npmTag, git }
     throw new Error('prereleases must use a non-latest npm dist-tag (for example next)');
   }
 
+  return { ...resolveReleaseTag({ releaseTag, git }), npmTag };
+}
+
+// Resolve trusted release metadata without relying on the triggering event.
+export function resolveReleaseTag({ releaseTag, git }) {
+  validateReleaseTag(releaseTag);
   const objectType = gitOr(
     git,
     ['cat-file', '-t', `refs/tags/${releaseTag}`],
@@ -83,7 +91,7 @@ export function validateStagePublish({ eventName, ref, releaseTag, npmTag, git }
   }
 
   const pkg = JSON.parse(git(['show', `${sha}:package.json`]));
-  if (pkg.name !== '@christianmoesl/pi-sbx') {
+  if (pkg.name !== PACKAGE_NAME) {
     throw new Error('tagged package.json has an unexpected package name');
   }
   if (`v${pkg.version}` !== releaseTag) {
@@ -92,7 +100,7 @@ export function validateStagePublish({ eventName, ref, releaseTag, npmTag, git }
     );
   }
 
-  return { releaseTag, npmTag, sha, version: pkg.version };
+  return { releaseTag, sha, version: pkg.version };
 }
 
 // GitHub Actions provides GITHUB_EVENT_NAME and GITHUB_REF; RELEASE_TAG and NPM_TAG come from the workflow env.

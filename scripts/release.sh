@@ -76,5 +76,5 @@ git tag -a "${release_tag}" -m "${release_tag}"
 git push origin "${release_tag}"
 
 echo "Pushed ${release_tag}; the Stage and release npm package workflow will validate and stage it."
-echo "After CI succeeds, approve the npm stage with 2FA, then publish the draft GitHub release."
+echo "After CI succeeds, approve the npm stage with 2FA; tell the agent once approved so it triggers GitHub publication (daily fallback)."
 echo "This script does not publish the package locally."
