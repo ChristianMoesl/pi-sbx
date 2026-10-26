@@ -241,7 +241,7 @@ The optional integration test waits for worker/image readiness, then creates and
 
 ## Releasing
 
-The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/release.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with generated notes. A maintainer approves the npm stage with 2FA; a separate publication workflow then publishes the matching GitHub draft once that exact version is public on npm.
+The package is published as [`@christianmoesl/pi-sbx`](https://www.npmjs.com/package/@christianmoesl/pi-sbx). Pushing an annotated version tag starts [the release pipeline](.github/workflows/release.yml). CI validates and **stages** the package on npm, then creates a **draft GitHub release** with commit-based notes. A maintainer approves the npm stage with 2FA; a separate publication workflow then publishes the matching GitHub draft once that exact version is public on npm.
 
 ### One-time npm setup
 
@@ -272,11 +272,28 @@ The tag push triggers three jobs:
 
 1. **Validate:** require an annotated tag reachable from `origin/main`, matching the tagged package version; install frozen dependencies, run checks, dry-run packing, and upload the packed tarball.
 2. **Stage:** download and verify that exact tarball's SHA-256, then run `npm stage publish --provenance`. Only this job has `id-token: write`; it does not install project dependencies or run package lifecycle scripts.
-3. **Release:** create a draft GitHub release with generated notes. It has `contents: write`; existing drafts or published releases are preserved on retry.
+3. **Release:** generate notes from the tagged Git history and create a draft GitHub release. It has `contents: write`; existing drafts or published releases are preserved on retry.
 
 The [publication workflow](.github/workflows/publish-approved-releases.yml) checks only pipeline-created drafts and publishes them after their exact package version becomes public on npm. It revalidates the annotated tag, reachability from `main`, and tagged package identity/version. It uses public registry metadata and GitHub permissions, not npm credentials, OIDC, or stage approval. It is separate from staging and never rebuilds or restages a release.
 
 Stable tags use the npm `latest` dist-tag. Prerelease tags (for example `v0.7.0-beta.1`) use `next` and mark the GitHub draft as a prerelease. Manual dispatch can select a different npm dist-tag; prereleases cannot use `latest`.
+
+### Release notes
+
+Notes come from conventional commit messages, including direct commits to `main`, rather than GitHub's PR-based generator:
+
+- `feat:` → **Features**, `fix:` → **Fixed**, and other changes → **Changes**. Scopes and the opening explanatory paragraph are retained, with links to each commit.
+- Routine `chore:`, `ci:`, and `test:` commits and merge commits are omitted. Breaking changes are always included in **Breaking changes**.
+- The baseline is the closest reachable prior release tag. Stable releases skip prerelease tags; prereleases may use a prior stable or prerelease tag. Only commits through the requested tag are included, not later changes on `main`.
+- Full Git history and release tags are required. A full-changelog link is always included; retries preserve existing draft or published descriptions.
+
+Preview notes locally:
+
+```sh
+node scripts/release-notes.mjs v0.7.2
+```
+
+To deliberately backfill only an existing release's description, generate and inspect a notes file, then use `gh release edit v<version> --repo ChristianMoesl/pi-sbx --notes-file <file>`. This does not change the tag, npm package, or release publication state.
 
 ### Approve and publish
 
@@ -318,7 +335,7 @@ gh workflow run release.yml --ref main \
   -f release_tag=v0.6.4 -f npm_tag=latest
 ```
 
-The npm dist-tag is immutable once staged. To change it, reject the stage and re-stage with the desired tag. A pending stage reserves its package version; a published version can never be reused. Do not retry a full pipeline against an existing stage: approve/reject it first. If necessary, finish a missing GitHub draft manually with `gh release create v<version> --draft --verify-tag --generate-notes`.
+The npm dist-tag is immutable once staged. To change it, reject the stage and re-stage with the desired tag. A pending stage reserves its package version; a published version can never be reused. Do not retry a full pipeline against an existing stage: approve/reject it first. If draft creation alone failed, rerun only the failed release job so commit-based notes and the staging notice are retained.
 
 ### Direct local publishing alternative
 

@@ -173,6 +173,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout trusted main and full release history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Create draft release or preserve existing one
         env:
           GH_TOKEN: ${{ github.token }}
@@ -197,12 +210,16 @@ jobs:
           if [[ "$RELEASE_TAG" == *-* ]]; then
             prerelease_args=(--prerelease)
           fi
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            printf '%s\n\n' "Staged on npm; approve the npm stage with 2FA before publishing this draft."
+            node scripts/release-notes.mjs "$RELEASE_TAG"
+          } > "$notes"
           gh release create "$RELEASE_TAG" \
             --repo "$REPO" \
             --draft \
             --verify-tag \
-            --generate-notes \
-            --notes "Staged on npm; approve the npm stage with 2FA before publishing this draft." \
+            --notes-file "$notes" \
             --target "$RELEASE_SHA" \
             "${prerelease_args[@]}" \
             --title "$RELEASE_TAG"

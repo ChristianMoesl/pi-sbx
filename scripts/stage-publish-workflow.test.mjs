@@ -28,11 +28,19 @@ test('staging retains OIDC, exact artifact verification and actionable npm authe
   assert.doesNotMatch(stage, /NPM_TOKEN|NODE_AUTH_TOKEN|npm stage approve|^\s+npm publish /m);
 });
 
-test('a successful stage gates draft release creation with generated notes', () => {
+test('a successful stage gates draft release creation with commit-based notes', () => {
   assert.match(release, /needs: \[validate, stage\]/);
   assert.match(release, /gh release create/);
   assert.match(release, /--draft/);
-  assert.match(release, /--generate-notes/);
+  assert.doesNotMatch(release, /--generate-notes/);
+  assert.match(release, /--notes-file "\$notes"/);
+  assert.match(release, /ref: main/);
+  assert.match(release, /fetch-depth: 0/);
+  assert.match(release, /fetch-tags: true/);
+  assert.match(release, /persist-credentials: false/);
+  assert.match(release, /node scripts\/release-notes\.mjs "\$RELEASE_TAG"/);
+  assert.ok(release.indexOf('node scripts/release-notes.mjs') < release.indexOf('gh release create'));
+  assert.ok(release.indexOf('preserving it.') < release.indexOf('node scripts/release-notes.mjs'), 'reruns preserve existing descriptions');
 });
 
 test('daily and dispatched publication checks cannot restage packages', () => {
