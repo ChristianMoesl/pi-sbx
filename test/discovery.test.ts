@@ -126,17 +126,43 @@ test("empty inventories are valid, malformed rows cannot masquerade as absence",
  }
 });
 
-test("rejects the pre-0.48 wrapper with upgrade guidance", () => {
-	assert.throws(() => parseMatchingSandboxes('{"sandboxes":[]}', cwd), /SBX 0\.48\.x required/);
+test("rejects the pre-0.48 wrapper with protocol guidance", () => {
+	assert.throws(() => parseMatchingSandboxes('{"sandboxes":[]}', cwd), /expected a sandbox array/);
 });
 
 
-test("accepts only the qualified stable 0.48 protocol family", async () => {
- for (const version of ["v0.48.0","0.48.9"]) assert.doesNotThrow(()=>validateSbxVersion(JSON.stringify({client:{version}})));
- for (const output of ["bad","null","{}",...['v0.46.0','v0.49.0','v0.48.0-rc.3'].map(version=>JSON.stringify({client:{version}}))]) {
-  assert.throws(()=>validateSbxVersion(output),/SBX 0\.48\.x required/);
- }
- let calls=0;
- await assert.rejects(discoverSandboxes(async()=>{calls++;return {code:0,stderr:"",killed:false,stdout:'{"client":{"version":"v0.49.0"}}'};},"sbx",cwd,false),/SBX 0\.48\.x required/);
- assert.equal(calls,1,"version failures must not proceed to discovery or another executable");
+test("accepts stable SBX versions from 0.48.0 without an upper bound", () => {
+	for (const version of ["v0.48.0", "0.48.9", "v0.49.0", "v0.50.0", "v1.0.0", "v2.0.0"]) {
+		assert.doesNotThrow(() => validateSbxVersion(JSON.stringify({ client: { version } })));
+	}
+	for (const output of ["bad", "null", "{}", ...["v0.46.0", "v0.47.99", "v0.48.0-rc.3", "v1.0.-1", "v-1.50.0"].map(version => JSON.stringify({ client: { version } }))]) {
+		assert.throws(() => validateSbxVersion(output), /SBX 0\.48\.0 or newer required/);
+	}
+});
+
+test("unsupported versions fail before discovery or fallback", async () => {
+	let calls = 0;
+	await assert.rejects(discoverSandboxes(async () => {
+		calls++;
+		return { code: 0, stderr: "", killed: false, stdout: '{"client":{"version":"v0.47.9"}}' };
+	}, "sbx", cwd, false), /SBX 0\.48\.0 or newer required/);
+	assert.equal(calls, 1, "version failures must not proceed to discovery or another executable");
+});
+
+test("newer versions reach discovery and still require the sandbox array contract", async () => {
+	for (const version of ["v0.50.0", "v1.0.0"]) {
+		for (const output of [JSON.stringify([{ name: "native", workspaces: [cwd] }]), '{"sandboxes":[]}']) {
+			const calls: string[][] = [];
+			const exec: Parameters<typeof discoverSandboxes>[0] = async (_command, args) => {
+				calls.push(args);
+				return { code: 0, stderr: "", killed: false, stdout: args[0] === "version" ? JSON.stringify({ client: { version } }) : output };
+			};
+			if (output.startsWith("[")) {
+				assert.equal((await discoverSandboxes(exec, "sbx", cwd, false))[0]?.name, "native");
+			} else {
+				await assert.rejects(discoverSandboxes(exec, "sbx", cwd, false), /expected a sandbox array/);
+			}
+			assert.deepEqual(calls, [["version", "--json"], ["ls", "--json"]]);
+		}
+	}
 });

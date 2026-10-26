@@ -25,7 +25,7 @@ function parseSandboxList(output: string): Record<string, unknown>[] {
 	}
 
 	if (!Array.isArray(parsed)) {
-		throw new Error("Could not parse sbx ls --json output: expected a sandbox array (SBX 0.48.x required)");
+		throw new Error("Could not parse sbx ls --json output: expected a sandbox array");
 	}
 	for (const value of parsed) {
 		if (value === null || typeof value !== "object" || Array.isArray(value) || typeof value.name !== "string" || !value.name.trim() || !Array.isArray(value.workspaces) || !value.workspaces.every((workspace: unknown) => typeof workspace === "string")) {
@@ -114,15 +114,16 @@ export async function discoverSandboxes(
 	return parseMatchingSandboxes(result.stdout, cwd, (workspace) => isWindowsPath(workspace) ? hostPaths.get(workspace) : workspace);
 }
 
-/** Qualify a protocol family deliberately; never assume all future CLI schemas. */
+/** Enforce a minimum stable CLI version; discovery validates the response schema. */
 export function validateSbxVersion(output: string): void {
 	let version: unknown;
 	try {
 		version = JSON.parse(output)?.client?.version;
 	} catch {
-		throw new Error("Could not parse sbx version --json output (SBX 0.48.x required)");
+		throw new Error("Could not parse sbx version --json output (SBX 0.48.0 or newer required)");
 	}
-	if (typeof version !== "string" || !/^v?0\.48\.\d+$/.test(version)) {
-		throw new Error(`SBX 0.48.x required; found ${typeof version === "string" ? version : "no client version"}`);
+	const parts = typeof version === "string" ? /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
+	if (!parts || (Number(parts[1]) === 0 && Number(parts[2]) < 48)) {
+		throw new Error(`SBX 0.48.0 or newer required; found ${typeof version === "string" ? version : "no client version"}`);
 	}
 }
