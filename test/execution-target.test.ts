@@ -449,6 +449,22 @@ test("missing sandbox blocks every routed tool and user bash, not explicit appro
 	assert.match(result.content[0].text, /pi-sbx/);
 });
 
+test("slash-command text in a model bash call cannot disable sandboxing", async () => {
+	const harness = createHarness();
+	await startHarness(harness);
+	await waitForSandbox(harness);
+	assert.equal(harness.tools.has("sbx"), false, "the user command must not be a model tool");
+
+	const output = await harness.tools.get("bash")!.execute("printed-command", { command: "printf '/sbx off\\n'" });
+	assert.match(output.content[0].text, /\/sbx off/);
+	await assert.rejects(harness.tools.get("bash")!.execute("shell-command", { command: "/sbx off" }));
+	assert.equal(harness.statuses.at(-1), "sbx: test-sandbox");
+	assert.equal(harness.entries.some(entry => entry.data?.hostDisabled === true), false);
+	await assert.rejects(harness.tools.get("read")!.execute("unapproved-after-text", {
+		path: "README.md", execution_target: "host",
+	}), /not approved/);
+});
+
 test("sbx off immediately permits host execution and stops waiting", async () => {
 	const harness = createHarness({ sandbox: false });
 	await startHarness(harness);

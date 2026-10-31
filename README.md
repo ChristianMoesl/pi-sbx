@@ -186,6 +186,7 @@ If no matching sandbox exists—or `sbx` cannot be discovered—routed tools and
 
 ## Security model
 
+- `/sbx off` is a user-interface command, not a model tool or a shell command. Text in a model response, tool output, or a sandboxed `bash` call cannot invoke it. A model can request `execution_target: "host"`, but each such call still needs the user's approval. Only enter `/sbx off` when you intend to permit subsequent host execution.
 - Pi and model-provider communication remain on the host.
 - Built-in shell and filesystem operations run in the selected sandbox.
 - The `read` tool may read skills discovered by Pi from the host, regardless of whether they came from global, project, package, settings, or CLI locations. Directory-based skills include supporting files below their base directory; standalone Markdown skills include only the discovered file. Canonical-path checks reject traversal and symlink escapes from skill directories.
